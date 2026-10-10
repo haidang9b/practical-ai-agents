@@ -1,0 +1,16 @@
+{
+  "name": "tokenkit",
+  "version": "0.1.0",
+  "description": "Token-economy toolkit for GitHub Copilot: output compression, repo map, context budget linter, guard hooks, skills and a TaskSpec shorthand.",
+  "type": "module",
+  "bin": {
+    "tk": "src/tk.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "license": "MIT"
+}

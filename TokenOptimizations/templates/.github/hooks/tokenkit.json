@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "command": "node -e \"import('./.tokenkit/hooks/session.mjs').catch(()=>0)\"",
+        "bash": "node -e \"import('./.tokenkit/hooks/session.mjs').catch(()=>0)\"",
+        "powershell": "node -e \"import('./.tokenkit/hooks/session.mjs').catch(()=>0)\"",
+        "cwd": ".",
+        "timeoutSec": 30
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "command": "node -e \"import('./.tokenkit/hooks/prompt.mjs').catch(()=>0)\"",
+        "bash": "node -e \"import('./.tokenkit/hooks/prompt.mjs').catch(()=>0)\"",
+        "powershell": "node -e \"import('./.tokenkit/hooks/prompt.mjs').catch(()=>0)\"",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "command": "node -e \"import('./.tokenkit/hooks/guard.mjs').catch(()=>0)\"",
+        "bash": "node -e \"import('./.tokenkit/hooks/guard.mjs').catch(()=>0)\"",
+        "powershell": "node -e \"import('./.tokenkit/hooks/guard.mjs').catch(()=>0)\"",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "command": "node -e \"import('./.tokenkit/hooks/post.mjs').catch(()=>0)\"",
+        "bash": "node -e \"import('./.tokenkit/hooks/post.mjs').catch(()=>0)\"",
+        "powershell": "node -e \"import('./.tokenkit/hooks/post.mjs').catch(()=>0)\"",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

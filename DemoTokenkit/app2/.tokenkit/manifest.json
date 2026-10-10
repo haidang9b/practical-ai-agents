@@ -1,0 +1,14 @@
+{
+  ".github/agents/lean.agent.md": "b9c6801b981765d1",
+  ".github/copilot-instructions.md": "cf0f8578d9848df7",
+  ".github/hooks/tokenkit.json": "b2c027be85c52355",
+  ".github/instructions/testing.instructions.md": "e93cd9dc42944712",
+  ".github/prompts/handoff.prompt.md": "02f20c88dbdc999a",
+  ".github/prompts/q.prompt.md": "6fe18fc1d04719fb",
+  ".github/prompts/spec.prompt.md": "57320aa262196792",
+  ".github/skills/context-audit/SKILL.md": "1b250fbbe1a122b4",
+  ".github/skills/handoff/SKILL.md": "77a5dd4b8249757e",
+  ".github/skills/lean-explore/SKILL.md": "cec60574dea10d62",
+  ".github/skills/lean-verify/SKILL.md": "c914eeb2102aa6e9",
+  ".vscode/settings.json": "b4fd65fe89590e13"
+}

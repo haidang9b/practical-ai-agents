@@ -1,0 +1,23 @@
+{
+  // tokenkit: keep build output and generated files out of agent search results
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/build": true,
+    "**/coverage": true,
+    "**/.next": true,
+    "**/obj": true,
+    "**/target": true,
+    "**/*.min.js": true,
+    "**/*.map": true,
+    "**/*.snap": true,
+    "**/package-lock.json": true,
+    "**/pnpm-lock.yaml": true,
+    "**/yarn.lock": true,
+    "**/.tokenkit/logs": true
+  },
+  // Preview: VS Code's built-in compression of large terminal output (off by default)
+  "chat.tools.compressOutput.enabled": true,
+  "chat.useHooks": true,
+  "chat.useAgentSkills": true
+}

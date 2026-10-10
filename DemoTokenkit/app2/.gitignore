@@ -1,0 +1,8 @@
+# tokenkit (generated)
+.tokenkit/logs/
+.tokenkit/repomap.md
+.tokenkit/handoff.md
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo

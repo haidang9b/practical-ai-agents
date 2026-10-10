@@ -1,0 +1,4 @@
+node_modules/
+src/logs/
+src/repomap.md
+src/manifest.json
