@@ -7,14 +7,17 @@ import { install, uninstall } from './lib/install.mjs';
 import { writeMap } from './lib/repomap.mjs';
 import { report } from './lib/report.mjs';
 import { runCommand } from './lib/run.mjs';
+import { verify } from './lib/verify.mjs';
 import { expandSpec, LEGEND } from './lib/spec.mjs';
 import { formatHints, locate } from './lib/locate.mjs';
 import { doctor, formatDoctor } from './lib/doctor.mjs';
-import { formatUsage, usageReport } from './lib/usage.mjs';
+import { formatCompare, formatUsage, usageReport } from './lib/usage.mjs';
 
 const HELP = `tokenkit (tk) — keep Copilot's context small
 
   tk run [--raw] -- <cmd...>    run a command, print compressed output (full log in .tokenkit/logs/last.log)
+  tk verify [--build] [--only typecheck,test]
+                                ALL checks (typecheck, lint, tests) in ONE call: fewer agent steps
   tk filter [--exit N]          compress stdin:  <cmd> 2>&1 | node .tokenkit/tk.mjs filter
   tk map [--print]              (re)build .tokenkit/repomap.md, the grep-able symbol index
   tk spec "<taskspec>"          expand TaskSpec shorthand into a full prompt  (--legend: print legend)
@@ -22,6 +25,7 @@ const HELP = `tokenkit (tk) — keep Copilot's context small
   tk budget [dir] [--ci]        audit always-on Copilot context; --ci exits 1 when over budget
   tk report [--days N]          tokens kept out of context, biggest tool outputs
   tk usage [folder] [--json]    VS Code's recorded chat usage for a folder (works without tokenkit installed)
+  tk usage <folderA> <folderB>  side-by-side comparison of the latest session in each
   tk doctor [repo]              check an installed repo: runs each hook with sample input; exit 1 on failure
   tk uninstall <repo>... [--dry-run]   remove what install added (keeps files you edited)
   tk install <repo>... [--force] [--dry-run]
@@ -42,6 +46,12 @@ async function main() {
       if (argv[0] === '--') argv.shift();
       const args = b64 ? [Buffer.from(b64, 'base64').toString('utf8')] : argv;
       return runCommand(args, { raw, shell });
+    }
+    case 'verify': {
+      const build = flag('--build');
+      const only = opt('--only');
+      process.chdir(repoRoot());
+      return verify(repoRoot(), { build, only: only ? only.split(',') : undefined });
     }
     case 'filter': {
       const exit = opt('--exit');
@@ -95,6 +105,11 @@ async function main() {
     }
     case 'usage': {
       const json = flag('--json');
+      if (argv.length === 2) {
+        const [a, b] = argv.map((f) => usageReport(f));
+        console.log(json ? JSON.stringify([a, b], null, 2) : formatCompare(a, b));
+        return 0;
+      }
       const r = usageReport(argv[0] ?? process.cwd());
       console.log(json ? JSON.stringify(r, null, 2) : formatUsage(r));
       return 0;

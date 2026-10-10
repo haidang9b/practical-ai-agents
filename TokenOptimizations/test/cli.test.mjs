@@ -62,9 +62,9 @@ test('TaskSpec resolves #Symbol to a line range', () => {
   assert.match(expandSpec('fix @a.ts#two off by one', dir).text, /a\.ts lines 4-7 \(two\)/);
 });
 
-test('the instructions template carries the current legend and every flag', () => {
-  const tpl = readFileSync(join(ROOT, 'templates', '.github', 'copilot-instructions.md'), 'utf8');
-  assert.ok(tpl.includes(LEGEND), 'legend out of date: regenerate with `tk spec --legend`');
+test('the /spec prompt carries the current legend and every flag', () => {
+  const tpl = readFileSync(join(ROOT, 'templates', '.github', 'prompts', 'spec.prompt.md'), 'utf8');
+  assert.ok(tpl.includes(LEGEND), 'legend out of date: regenerate with `tk spec --legend` into templates/.github/prompts/spec.prompt.md');
   for (const f of Object.keys(FLAGS)) assert.ok(tpl.includes(`\`${f}\``), f);
 });
 
@@ -121,19 +121,19 @@ test('install is idempotent, merges instructions and never clobbers user files',
 test('re-install upgrades untouched tokenkit files and keeps locally edited ones', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tk-upgrade-'));
   assert.equal(tk(['install', dir]).status, 0);
-  const skill = join(dir, '.github', 'skills', 'handoff', 'SKILL.md');
+  const skill = join(dir, '.github', 'skills', 'lean-explore', 'SKILL.md');
   const agent = join(dir, '.github', 'agents', 'lean.agent.md');
   const tplSkill = readFileSync(skill, 'utf8');
   // Simulate an older tokenkit version: file content and manifest agree on "old".
   const manifestPath = join(dir, '.tokenkit', 'manifest.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   writeFileSync(skill, 'old version\n');
-  manifest['.github/skills/handoff/SKILL.md'] = createHash('sha256').update('old version\n').digest('hex').slice(0, 16);
+  manifest['.github/skills/lean-explore/SKILL.md'] = createHash('sha256').update('old version\n').digest('hex').slice(0, 16);
   writeFileSync(manifestPath, JSON.stringify(manifest));
   // And a user edit the manifest doesn't know about.
   writeFileSync(agent, 'my custom agent\n');
   const out = tk(['install', dir]).stdout;
-  assert.match(out, /updated {3}\.github\/skills\/handoff\/SKILL\.md/);
+  assert.match(out, /updated {3}\.github\/skills\/lean-explore\/SKILL\.md/);
   assert.match(out, /skipped {3}\.github\/agents\/lean\.agent\.md \(edited locally/);
   assert.equal(readFileSync(skill, 'utf8'), tplSkill);
   assert.equal(readFileSync(agent, 'utf8'), 'my custom agent\n');
@@ -202,6 +202,41 @@ test('regression: files added after install are mapped on the next prompt (was: 
   assert.equal(r.status, 0, r.stderr);
   assert.match(readFileSync(join(dir, '.tokenkit', 'repomap.md'), 'utf8'), /· 1 source files/);
   assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /src\/lib\/taskStorage\.ts:\d+-\d+ {2}(saveTasks|loadTasks)/);
+});
+
+test('tk verify runs every check in one call and reports each', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tk-verify-'));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: {
+    typecheck: 'node -e "console.log(1)"',
+    lint: 'node -e "process.exit(3)"',
+    test: 'node -e "for(let i=0;i<50;i++)console.log(String.fromCharCode(10003),String.fromCharCode(99,97,115,101),i)"',
+    dev: 'vite --watch'
+  } }));
+  assert.equal(tk(['install', dir]).status, 0);
+  const r = spawnSync(process.execPath, [join(dir, '.tokenkit', 'tk.mjs'), 'verify'], { encoding: 'utf8', env: { ...process.env, TOKENKIT_LOG_DIR: LOGS } });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /\[tk\] verify: typecheck OK · lint FAILED · test OK$/m);
+  assert.doesNotMatch(r.stdout, /case 7/, 'passing output is not printed');
+  assert.doesNotMatch(r.stdout, /dev/);
+});
+
+test('re-install retires files an older tokenkit installed and keeps edited ones', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tk-retire-'));
+  assert.equal(tk(['install', dir]).status, 0);
+  // Pretend an older version installed two skills that no longer ship.
+  const old = (rel, body) => { mkdirSync(join(dir, rel, '..'), { recursive: true }); writeFileSync(join(dir, rel), body); return body; };
+  const manifestPath = join(dir, '.tokenkit', 'manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const h = (s) => createHash('sha256').update(s).digest('hex').slice(0, 16);
+  manifest['.github/skills/handoff/SKILL.md'] = h(old('.github/skills/handoff/SKILL.md', 'old skill\n'));
+  manifest['.github/skills/context-audit/SKILL.md'] = h('original\n');
+  old('.github/skills/context-audit/SKILL.md', 'my edits\n');
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+  const out = tk(['install', dir]).stdout;
+  assert.match(out, /retired {3}\.github\/skills\/handoff\/SKILL\.md/);
+  assert.match(out, /kept {6}\.github\/skills\/context-audit\/SKILL\.md \(no longer part of tokenkit, but edited locally\)/);
+  assert.ok(!existsSync(join(dir, '.github', 'skills', 'handoff')));
+  assert.equal(readFileSync(join(dir, '.github', 'skills', 'context-audit', 'SKILL.md'), 'utf8'), 'my edits\n');
 });
 
 test('mergeBlock replaces an existing block in place', () => {

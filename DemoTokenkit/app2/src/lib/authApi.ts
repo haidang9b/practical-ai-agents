@@ -1,3 +1,5 @@
+import { API_BASE_URL } from './api';
+
 export interface AuthUser {
   id: string;
   email: string;
@@ -15,7 +17,7 @@ interface AuthResponse extends AuthSession {
 }
 
 async function authRequest(path: string, options: RequestInit = {}): Promise<AuthSession> {
-  const response = await fetch(`/api/auth/${path}`, {
+  const response = await fetch(`${API_BASE_URL}/auth/${path}`, {
     ...options,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...options.headers },
@@ -45,5 +47,5 @@ export function restoreSession(): Promise<AuthSession> {
 }
 
 export async function signOut(): Promise<void> {
-  await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+  await fetch(`${API_BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' });
 }

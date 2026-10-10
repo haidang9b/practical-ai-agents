@@ -8,7 +8,7 @@ VS Code records how each prompt is made up. In both apps it looked like this at 
 
 | Part of every request | app1 (without) | app2 (with) | Can tokenkit change it? |
 |---|---|---|---|
-| Copilot's system instructions | 38% | 42% | No (tokenkit adds ~720 tokens to it) |
+| Copilot's system instructions | 38% | 42% | No (tokenkit adds to it: ~720 tokens then, ~324 now) |
 | **Tool definitions** (schemas of all enabled tools) | **50%** | **47%** | **Yes, with the `lean` agent.** Not in default Agent mode. |
 | Your messages | 4% | 6% | Slightly (TaskSpec, terse replies) |
 | Tool results | 8% | 5% | Yes: compression, read guard, bounded commands |
@@ -19,6 +19,21 @@ Three more things made the two runs incomparable:
 1. **Different work.** app1 had 2 turns and 115 tool calls; app2 had 3 turns and 156 tool calls. The same model rarely takes the same path twice.
 2. **Most expensive output was the browser.** The agent tested the UI in the built-in browser: 23 browser calls in app1, 39 in app2. Page snapshots are large, and VS Code doesn't let hooks shrink a tool's output after it runs.
 3. **A tokenkit bug, now fixed.** The repo map had been built when `app2` was still empty and wasn't refreshed for an hour, so plain-language hints never fired (0 of 3 prompts). Since this fix, the map rebuilds whenever source files change.
+
+## What the second comparison showed (3 features each)
+
+`app2` (with tokenkit) recorded more credits than `app1`, although tokenkit compressed 82 command runs (about 60k → 15k tokens). The sessions showed why:
+
+| | app1 (5 turns) | app2 (4 turns) |
+|---|---|---|
+| Terminal calls | 22 | 35 (typecheck 7×, vitest 5×, lint 3×, build 3×, dev server and port checks) |
+| File reads | 30 | 18 |
+
+- **Steps cost more than output.** Each extra call re-sent 50k–120k tokens of context, while most check outputs were tiny (a passing typecheck is about 20 tokens).
+- **tokenkit's always-on text (~720 tokens then) was paid on every call.**
+- **Some of its rules added calls:** "one command per call", and "narrow test first, full suite after".
+
+**Changed since:** always-on context is down to ~324 tokens, `tk verify` runs every check in one call, the instructions say not to start dev servers or browsers unless asked, and the step-adding rules are gone. Re-run `install` on both apps, then compare again.
 
 ## Where the real savings are
 
@@ -62,16 +77,36 @@ git reset --hard; git clean -fd     # in that copy only: undo the agent's change
 - **Each prompt twice per copy.** Compare averages; one run is noise.
 - Plant the same bug before prompts P1 and P2 (below) in both copies, using the same edit.
 
-### 3. Measure
+### 3. Turn on exact logging (once, before running)
 
-After each run:
+In your **user** settings (`Ctrl+Shift+P` → *Preferences: Open User Settings (JSON)*), add:
 
-```powershell
-node D:\Learning\practical-ai-agents\TokenOptimizations\src\tk.mjs usage "D:\Learning\practical-ai-agents\Compare\without"
-node D:\Learning\practical-ai-agents\TokenOptimizations\src\tk.mjs usage "D:\Learning\practical-ai-agents\Compare\with"
+```jsonc
+"github.copilot.chat.agentDebugLog.fileLogging.enabled": true
 ```
 
-`tk usage` reads VS Code's own records for that folder, so it works on the copy without tokenkit too. In the chat view, the context meter in the input box (or **Chat: Show Context Window Usage**) shows the same *Context Window* and *Session Cost*.
+VS Code then records every model call with its input, cached and output tokens, plus every tool call and hook. It applies only to sessions started after you turn it on; it's off by default.
+
+### 4. Measure
+
+After running the same prompt in both copies:
+
+```powershell
+node D:\Learning\practical-ai-agents\TokenOptimizations\src\tk.mjs usage "D:\Learning\practical-ai-agents\Compare\without" "D:\Learning\practical-ai-agents\Compare\with"
+```
+
+This prints the latest session of each side by side, with a change column. The `EXACT` rows (model calls, input, uncached input, output, tokenkit hook actions) appear once logging is on. With one folder, `tk usage <folder>` lists every session in it. It reads VS Code's own records, so it works on the copy without tokenkit too.
+
+### See it in the debug views
+
+| Where | Command (`Ctrl+Shift+P`) | What shows the difference |
+|---|---|---|
+| **Agent Debug Logs** | *Show Agent Debug Logs* | Each `llm_request` with input, cached and output tokens; each `tool_call` with its result; each `hook` with its output. Only the tokenkit copy has `hook` entries with `updatedInput` (a rewritten command) or `[tokenkit] Likely locations` (a hint). |
+| **Chat Debug View** | *Show Chat Debug View* | Every request's full prompt. Open a terminal tool result: raw test output in one copy, a `[tk] FAILED … 1540→29 lines` summary in the other. *Show Tools* lists the tool definitions sent, which is where the `lean` agent makes the biggest cut. |
+| **Context meter** | *Show Context Window Usage* (or hover the meter in the chat input) | *Context Window* fill and *Session Cost* for the current chat |
+| **Hooks output** | *View → Output → GitHub Copilot Chat Hooks* | Each hook run, so you can confirm tokenkit acted |
+
+Note: VS Code itself already moves any tool result larger than 8 KB to a file and gives the model a one-line pointer (`chat.agent.largeToolResultsToDisk`, on by default). For huge outputs, tokenkit's gain is handing over the failures directly instead of a pointer followed by extra file reads. For mid-size outputs (2–8 KB), VS Code passes them through whole, and tokenkit compresses them.
 
 | Number | Trust it for |
 |---|---|

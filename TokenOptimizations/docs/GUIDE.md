@@ -39,7 +39,7 @@ step 4   [instructions][your request][10,000-token test log][cart.js][edit]  -> 
 | Tool output: test and build logs, file reads, directory listings | Enters once, then rides along on every later step | Verbose commands run through a compressor (about 97% smaller in our test). Lockfile, generated and huge whole-file reads are blocked. `git log` and recursive listings must be bounded. |
 | Exploration: search, list and read calls to find code | Each call is another full round-trip | Plain-language requests get "likely locations" from the repo map before the agent starts. A repo map gives file and line in one grep. TaskSpec puts the scope in your request. |
 | Model output: explanations, whole-file rewrites | Output costs 5 to 8 times input | Terse-output rules, and answer-shape flags (`>diff`, `>ans`) |
-| Always-on context: instructions, tool definitions | Sent with every call | About 720 tokens of instructions, checked by `tk budget`. A lean agent with a minimal tool list. |
+| Always-on context: instructions, tool definitions | Sent with every call | About 324 tokens of instructions and skill descriptions, checked by `tk budget`. A lean agent with a minimal tool list. |
 
 The habits side (model choice, prompt cache, session length) is covered in [PLAYBOOK.md](PLAYBOOK.md).
 
@@ -65,11 +65,9 @@ your-repo/
 │   │   └── testing.instructions.md    # loaded only when test files are edited (Layer A)
 │   ├── skills/                        # loaded only when relevant (Layer A)
 │   │   ├── lean-explore/SKILL.md
-│   │   ├── lean-verify/SKILL.md
-│   │   ├── handoff/SKILL.md
-│   │   └── context-audit/SKILL.md
+│   │   └── lean-verify/SKILL.md
 │   ├── agents/lean.agent.md           # "lean" custom agent (Layer A)
-│   ├── prompts/                       # /q  /handoff  /spec  slash commands (Layer A)
+│   ├── prompts/                       # /q  /handoff  /spec  /audit  slash commands (Layer A)
 │   └── hooks/tokenkit.json            # tells Copilot to run the hooks (Layer B)
 ├── .tokenkit/                         # the runtime, committed with the repo
 │   ├── tk.mjs                         # CLI entry point (Layer C)
@@ -132,33 +130,28 @@ your-repo/
 
 Guidance is plain Markdown that Copilot loads into the model's context. It costs tokens, so each piece is kept small and loaded only when needed.
 
-### 3.1 The instructions block (always loaded, about 500 tokens)
+### 3.1 The instructions block (always loaded, about 226 tokens)
 
 `install` adds this block to `.github/copilot-instructions.md`, between `<!-- tokenkit:start -->` and `<!-- tokenkit:end -->`. Your own content outside the markers is never touched, and re-running install replaces only the block.
 
 | Rule in the block | Why it saves tokens |
 |---|---|
-| Terse replies: no preamble, recap or closing summary; never paste whole files | Output tokens cost the most |
-| Find, then read: grep the repo map or search, read only the needed line range, don't re-read | Every file read stays in the context for the rest of the session |
-| Never open lockfiles, generated, minified or build output | These are huge and almost never useful |
-| Run builds and tests as `node .tokenkit/tk.mjs run -- <cmd>`, narrowest target first | Compressed output; one test file instead of the whole suite |
-| Bound exploratory commands (`git log -n 20`, `git diff --stat`, `--tail 100`) | Unbounded listings can be tens of thousands of tokens |
-| If a `[tokenkit]` hook denies a call, run its suggested command verbatim | Avoids a back-and-forth after a deny |
-| Plain-language requests: questions get short direct answers, changes get a reply of 3 lines or fewer; read `[tokenkit] Likely locations` first | Gives plain English the same answer shape and starting point as TaskSpec flags |
-| Low-risk ambiguity: pick a sensible default and state it | A clarifying question costs a full extra round-trip |
-| Do only what was asked | Unrequested refactors cost output and review time |
-| TaskSpec legend (6 lines) | Lets you write one-line, fully scoped requests (see [5.5](#55-taskspec)) |
+| Every tool call re-sends the whole chat, so steps cost most: plan, batch, no repeated or exploratory calls | Measured on a real app: an extra step at 50k–120k tokens of context costs far more than a long command output |
+| Locate before reading: `[tokenkit] Likely locations`, or grep the repo map, then read only those lines | Every file read stays in the context for the rest of the session |
+| Verify once, at the end, with `tk verify` (typecheck, lint, tests in one call) | Replaces 5–15 separate check calls per task with one or two |
+| Don't start dev servers or browsers to check work unless asked | Browser page snapshots were the largest outputs in a real comparison, and VS Code can't shrink them |
+| Skip lockfiles and generated output; bound commands; follow `[tokenkit]` hook messages verbatim | Avoids huge outputs and back-and-forth after a block |
+| Terse replies, never paste whole files; do only what was asked; sensible defaults instead of questions | Output tokens cost the most; a clarifying question is a full extra round-trip |
 
-### 3.2 Skills (about 55 tokens each until used)
+### 3.2 Skills (about 50 tokens each until used)
 
 Copilot keeps only each skill's `name` and `description` in context. It reads the full `SKILL.md` body only when the task matches the description. That makes skills the cheap place for procedures.
 
 | Skill | Loaded when | What it tells the agent |
 |---|---|---|
 | `lean-explore` | Locating code, or editing an unfamiliar area | A 3-call recipe: grep the repo map, then a specific text search, then read 60 to 150 lines. Stop once the exact lines are known. |
-| `lean-verify` | Running builds, tests or linters, or fixing a failing test | Always use `tk run`, grep the log instead of reading it, one test first (per-runner table), at most 3 fix-and-rerun cycles, one command per terminal call, no task tools for builds |
+| `lean-verify` | Running builds, tests or linters, or fixing a failing test | Finish with one `tk verify`; while fixing, re-run only the failing test once per attempt; at most 3 attempts; grep logs instead of reading them; no dev servers, browsers or task tools to check work |
 | `handoff` | You say handoff, checkpoint or new chat, or the chat got long | Write a 25-line `.tokenkit/handoff.md` (goal, done, next, files with line ranges, decisions, verify command) |
-| `context-audit` | You ask to reduce Copilot cost or clean up instructions | Run `tk budget` and `tk report`, then fix the biggest sources first |
 
 ### 3.3 Path-scoped instructions
 
@@ -173,8 +166,9 @@ Pick **lean** in the chat's agent picker. Its frontmatter limits tools to `read`
 | Command | What runs | Use it for |
 |---|---|---|
 | `/q <question>` | Ask mode, model `GPT-5 mini (copilot)`, no tools, at most 5 lines | Quick questions that need no repo access |
-| `/handoff` | The handoff skill | Ending a long session cheaply; continue in a new chat with `#file:.tokenkit/handoff.md continue` |
-| `/spec <taskspec>` | The lean agent, with TaskSpec rules | One-line scoped tasks ([5.5](#55-taskspec)) |
+| `/handoff` | Writes a 25-line handoff note (instructions live in the prompt file) | Ending a long session cheaply; continue in a new chat with `#file:.tokenkit/handoff.md continue` |
+| `/spec <taskspec>` | The lean agent, with the TaskSpec legend | One-line scoped tasks ([5.5](#55-taskspec)) |
+| `/audit` | Audit and shrink the repo's Copilot setup | When costs creep up, or after editing instructions |
 
 If your model picker shows a different name for the small model, edit `model:` in `.github/prompts/q.prompt.md`.
 
@@ -479,9 +473,9 @@ fix @src/cart.js#applyDiscount pct is a percentage +test >diff
 ```
 
 How it works:
-- The model learns the notation from the 6-line legend in the instructions block. You type it straight into chat; no preprocessing.
+- You type it straight into chat. The prompt hook expands it into plain instructions before the model sees it, so the model doesn't need to know the notation. If hooks are disabled, use `/spec <line>`: the `/spec` prompt file carries the legend.
 - `tk spec "<line>"` shows the full expansion and resolves `#Symbol` to exact lines using the same extractors as the repo map. Use it to check a spec, or to feed Copilot CLI.
-- Verbs and flags are defined once in `src/lib/spec.mjs`. A test fails if the legend in the instructions template drifts from the code.
+- Verbs and flags are defined once in `src/lib/spec.mjs`. A test fails if the legend in `templates/.github/prompts/spec.prompt.md` drifts from the code.
 
 ```text
 $ node .tokenkit/tk.mjs spec "fix @src/cart.js#applyDiscount pct is a percentage +test >diff"
@@ -626,6 +620,7 @@ Prefer `@path:range` over VS Code's `#file:` for big files. `#file` pastes the w
 
 | Command | When |
 |---|---|
+| `node .tokenkit/tk.mjs verify [--build]` | All checks in one call (what the agent should use too) |
 | `node .tokenkit/tk.mjs run -- <cmd>` | Run anything noisy yourself, or see what the agent sees |
 | `node .tokenkit/tk.mjs map` | After big refactors (otherwise it refreshes hourly) |
 | `node .tokenkit/tk.mjs spec "<taskspec>"` | Check a spec, or see the lines a `#Symbol` resolves to |
@@ -769,7 +764,7 @@ Adapt the end of the pattern to your own commands, such as `dotnet test`. Keep i
 - **A new TaskSpec verb or flag:**
   1. Edit `VERBS` / `FLAG_DEFS` in `spec.mjs`.
   2. Run `node src/tk.mjs spec --legend`.
-  3. Paste the output into `templates/.github/copilot-instructions.md`.
+  3. Paste the output into `templates/.github/prompts/spec.prompt.md`.
   4. Run `npm test`.
 - **A new rule for the agent:** prefer a skill (loaded on demand) or a path-scoped `.instructions.md` over the always-on block. Then run `tk budget`.
 

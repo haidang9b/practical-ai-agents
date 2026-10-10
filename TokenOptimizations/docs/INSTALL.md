@@ -77,11 +77,10 @@ created   .github/agents/lean.agent.md
 created   .github/copilot-instructions.md
 created   .github/hooks/tokenkit.json
 created   .github/instructions/testing.instructions.md
+created   .github/prompts/audit.prompt.md
 created   .github/prompts/handoff.prompt.md
 created   .github/prompts/q.prompt.md
 created   .github/prompts/spec.prompt.md
-created   .github/skills/context-audit/SKILL.md
-created   .github/skills/handoff/SKILL.md
 created   .github/skills/lean-explore/SKILL.md
 created   .github/skills/lean-verify/SKILL.md
 created   .vscode/settings.json
@@ -132,7 +131,7 @@ tokenkit doctor: D:\code\my-app
   [ok]   repo map present (1 source files)
   [ok]   .gitignore keeps .tokenkit/logs/ out of git
   [ok]   .tokenkit/ will be committed with the repo
-  [ok]   always-on context ~718 tokens (budget 1200)
+  [ok]   always-on context ~324 tokens (budget 1200)
 
 All local checks passed.
 ```
@@ -210,6 +209,7 @@ node "$kit\src\tk.mjs" install D:\code\my-app
 ```
 
 - `updated` — a tokenkit file you never edited was upgraded.
+- `retired` — a file an older version installed and this one no longer ships (removed only if you never edited it).
 - `skipped … (edited locally …)` — you changed that file, so it is kept. Add `--force` to replace it.
 - The runtime in `.tokenkit/` is always refreshed. Your `.tokenkit/config.json` is kept.
 

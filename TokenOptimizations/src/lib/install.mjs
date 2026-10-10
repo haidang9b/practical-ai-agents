@@ -81,6 +81,21 @@ export function install(targetArg, { dryRun = false, force = false } = {}) {
       if (manifest[rel]) next[rel] = manifest[rel];
     }
   }
+  // Files an older tokenkit installed but this version no longer ships: remove
+  // them if untouched (they would keep costing tokens), keep them if edited.
+  for (const [rel, hash] of Object.entries(manifest)) {
+    if (rel in next || existsSync(join(templates, rel))) continue;
+    const p = join(target, rel);
+    if (!existsSync(p)) continue;
+    if (sha(readFileSync(p, 'utf8')) !== hash) { log.push(`kept      ${rel} (no longer part of tokenkit, but edited locally)`); continue; }
+    if (!dryRun) {
+      rmSync(p);
+      for (let d = dirname(p); d.startsWith(target) && d !== target; d = dirname(d)) {
+        try { if (readdirSync(d).length === 0) rmdirSync(d); else break; } catch { break; }
+      }
+    }
+    log.push(`retired   ${rel} (no longer part of tokenkit)`);
+  }
   if (!dryRun) writeFileSync(manifestPath, JSON.stringify(next, null, 2) + '\n');
 
   // 3. .gitignore

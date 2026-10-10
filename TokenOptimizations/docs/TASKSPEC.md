@@ -6,7 +6,7 @@ The prompt you type is rarely what costs money. What costs money is what the age
 <verb> [@path[:L1-L2|#Symbol]]... <goal> [flags]
 ```
 
-Copilot learns the notation from a ~150-token legend inside the tokenkit block of `.github/copilot-instructions.md`, so you can type it straight into chat. The prompt hook also expands it before the agent starts, resolving `#Symbol` to exact lines.
+Type it straight into chat. The prompt hook expands it into plain instructions before the agent starts, resolving `#Symbol` to exact lines, so it costs nothing on requests that don't use it. If hooks are disabled in your organization, run it through `/spec <line>`: the `/spec` prompt file carries the legend.
 
 **TaskSpec is optional.** Plain-language requests get location hints from the same repo map automatically (see [GUIDE.md section 4.7](GUIDE.md#47-the-prompt-hook-plain-language-requests)). Use TaskSpec when you want exact scope, constraints or answer shape.
 
@@ -78,4 +78,4 @@ copilot -p (node .tokenkit/tk.mjs spec "fix @src/cart.js#applyDiscount pct is a 
 
 ## Extending
 
-Verbs and flags are defined once in `src/lib/spec.mjs` (`VERBS`, `FLAG_DEFS`). After changing them, regenerate the legend with `node src/tk.mjs spec --legend`, paste it into `templates/.github/copilot-instructions.md`, and re-run `install`. A test fails if the template and the code drift apart.
+Verbs and flags are defined once in `src/lib/spec.mjs` (`VERBS`, `FLAG_DEFS`). After changing them, regenerate the legend with `node src/tk.mjs spec --legend` into `templates/.github/prompts/spec.prompt.md`, paste it into `templates/.github/copilot-instructions.md`, and re-run `install`. A test fails if the template and the code drift apart.

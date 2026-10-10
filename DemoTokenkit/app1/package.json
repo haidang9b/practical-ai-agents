@@ -11,6 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:api": "node scripts/test-api.mjs",
+    "test:migration": "node scripts/test-migration.mjs",
+    "test:analytics": "node scripts/test-analytics.mjs",
+    "test:habits": "node scripts/test-habits.mjs",
     "lint": "eslint .",
     "typecheck": "tsc -b --pretty"
   },

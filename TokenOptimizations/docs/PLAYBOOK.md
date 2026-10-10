@@ -56,7 +56,7 @@ Illustrative cost at Sonnet 4.6 rates: one 10k-token test log entering at step 5
 
 - Tool definitions are input on every call; a few dozen can cost 10–20k tokens. Give each custom agent a minimal `tools:` list, and disable MCP servers you aren't using *before* starting a session.
 - Keep one instructions file (`copilot-instructions.md`, `AGENTS.md` and `CLAUDE.md` are all loaded if present). Move language-specific rules into `.github/instructions/*.instructions.md` with a narrow `applyTo`, and procedures into skills.
-- Run `node .tokenkit/tk.mjs budget` (or the `context-audit` skill). Add `budget --ci` to CI to keep it from regrowing.
+- Run `node .tokenkit/tk.mjs budget` (or `/audit`). Add `budget --ci` to CI to keep it from regrowing.
 
 ## 8. Use the free features
 

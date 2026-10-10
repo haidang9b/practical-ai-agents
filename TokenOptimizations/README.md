@@ -19,10 +19,11 @@ Each agent step re-sends the whole conversation, so **a 10k-token test log isn't
 
 | Piece | What it does | VS Code | Copilot CLI |
 |---|---|---|---|
-| **Instructions block** | ~500 always-on tokens: terse output, find-then-read, run commands via `tk`, bounded commands, TaskSpec legend. | ✓ | ✓ |
-| **4 skills** | `lean-explore`, `lean-verify`, `handoff`, `context-audit`. About 55 tokens each always-on (name + description); bodies load only when relevant. | ✓ | ✓ |
+| **Instructions block** | ~226 always-on tokens: steps cost most, locate-then-read, verify once with `tk verify`, no dev servers/browsers unless asked, bounded commands, terse replies. | ✓ | ✓ |
+| **2 skills** | `lean-explore`, `lean-verify`. About 50 tokens each always-on (name + description); bodies load only when relevant. | ✓ | ✓ |
+| **`tk verify`** | Typecheck, lint and tests in **one** call, printing only failures. Fewer agent steps is the biggest saving on small projects. | ✓ | ✓ |
 | **`lean` agent** | Minimal toolset (tool schemas are input tokens on every call), terse replies, optional cheap-model pin. | ✓ | — |
-| **`/q`, `/handoff`, `/spec`** | `/q` is a small model with no tools. `/handoff` writes a 25-line checkpoint so you can start a fresh session. `/spec` runs a TaskSpec. | ✓ | — |
+| **`/q`, `/handoff`, `/spec`, `/audit`** | `/q` is a small model with no tools. `/handoff` writes a 25-line checkpoint so you can start a fresh session. `/spec` runs a TaskSpec. | ✓ | — |
 | **TaskSpec** | One-line notation (`fix @src/a.ts#login null user +test >diff`) that front-loads scope, constraints and answer shape. See [docs/TASKSPEC.md](docs/TASKSPEC.md). | ✓ | ✓ |
 | **prompt hook** (on submit) | Plain-language requests get up to 5 "likely locations" (file, line range, symbol) matched from the repo map, attached before the agent starts. A TaskSpec line gets its expansion. Vague prompts get nothing. Preview with `tk locate --why "…"`. | ✓ | — (output ignored) |
 | **guard hook** (pre-tool) | Verbose build/test/install commands → `tk run`. Denies lockfile, generated and huge whole-file reads, unbounded `git log`, recursive listings and `docker logs`, each with a bounded alternative. Denies forged `tk --b64` wrappers. | ✓ rewritten in place | ✓ rewritten in place |

@@ -1,24 +1,14 @@
 ---
 name: lean-verify
-description: Run builds, tests, linters or type-checks with minimal output. Use before executing any command that may print a lot, and when iterating on a failing test.
+description: Run builds, tests, linters or type-checks with the fewest calls and smallest output. Use before running any check, and when fixing a failing test.
 ---
 # Lean verification
 
-- Use the terminal, not task-creation tools, for builds and tests, unless the user asked for a task.
-- Run through the compressor: `node .tokenkit/tk.mjs run -- <command>`. It prints the status, the first lines, errors with context, and the summary. The full log is `.tokenkit/logs/last.log`.
-- Need more detail? Grep `.tokenkit/logs/last.log` for the test name or error text. Never read it whole.
-- One command per terminal call: `cd` in its own call rather than chained with `&&` or `;`, so the command wraps cleanly. If a `[tokenkit]` hook denies a call, run the command it suggests, verbatim.
-- Start with the narrowest target:
+Each command is one more model call that re-sends the whole conversation. Fewer calls save more than shorter output.
 
-| runner | one file / one test |
-|---|---|
-| vitest / jest | `npx vitest run path/x.test.ts -t "name"` / `npx jest path/x.test.ts -t "name"` |
-| pytest | `pytest path/test_x.py::test_name -q` |
-| go | `go test ./pkg/x -run TestName` |
-| dotnet | `dotnet test --filter "FullyQualifiedName~Name" -v q` |
-| cargo | `cargo test -q name` |
-| maven / gradle | `mvn -q test -Dtest=Class#method` / `gradle test --tests Class.method -q` |
-
-- Prefer quiet reporters: `-q`, `--silent`, `--reporter=dot`, `--no-progress`, `-v q`.
-- Fix loop budget: at most 3 fix-and-rerun cycles on the same failure. Then stop and report the failing assertion (one line), the suspected cause, and what you tried.
-- Run the broad suite once at the end, not after every edit.
+- **Finish with one call:** `node .tokenkit/tk.mjs verify` runs typecheck, lint and tests together and prints only what failed. Add `--build` when the build matters. Don't run typecheck, lint and tests as separate calls.
+- **While fixing one failing test**, re-run just that test, once per fix attempt: `node .tokenkit/tk.mjs run -- npx vitest run path/x.test.ts` (`pytest path::name -q`, `go test ./pkg -run Name`, `dotnet test --filter Name`).
+- **At most 3 fix attempts** on the same failure. Then stop and report the failing assertion (one line), the suspected cause, and what you tried.
+- **Need more detail?** Grep the log file named in the `[tk]` header. Never read it whole.
+- **Don't** start dev servers, open browsers, or poll ports to check work unless the user asked. Tests and typecheck are the evidence.
+- **Use the terminal** for builds and tests, not task-creation tools, unless the user asked for a task.

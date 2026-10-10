@@ -30,7 +30,7 @@ function spawnIn(shell, cmd, env) {
   return spawn(cmd, { shell: true, env });
 }
 
-export function runCommand(args, { raw = false, shell } = {}) {
+export function runCommand(args, { raw = false, shell, logRef = 'last', quietOk = false } = {}) {
   const cfg = loadConfig().run;
   const cmd = joinArgs(args);
   if (!cmd) {
@@ -70,9 +70,9 @@ export function runCommand(args, { raw = false, shell } = {}) {
       const saved = r.stats.rawTokens > r.stats.keptTokens
         ? ` · ${r.stats.rawLines}→${r.stats.keptLines} lines, ~${fmtTokens(r.stats.rawTokens)}→${fmtTokens(r.stats.keptTokens)} tokens`
         : '';
-      const lines = [`[tk] ${status} in ${secs}s${saved} · full log: .tokenkit/logs/last.log`];
-      if (r.notes.length) lines.push(`[tk] ${r.notes.join('; ')}`);
-      if (r.text) lines.push(r.text);
+      const lines = [`[tk] ${status} in ${secs}s${saved} · full log: .tokenkit/logs/${logRef === 'own' ? logName : 'last.log'}`];
+      if (r.notes.length && !(quietOk && exitCode === 0)) lines.push(`[tk] ${r.notes.join('; ')}`);
+      if (r.text && !(quietOk && exitCode === 0)) lines.push(r.text);
       process.stdout.write(lines.join('\n') + '\n');
 
       try {
