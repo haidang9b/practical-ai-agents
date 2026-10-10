@@ -2,6 +2,8 @@ Todo App
 
 A modern, minimalist Todo application built with React, TypeScript, Vite, and Tailwind CSS.
 
+Express powers the authentication API. User accounts and refresh sessions are stored in SQLite.
+
 ✨ Features
 ✅ Create, edit, delete, and complete tasks
 📝 Add descriptions, priorities, categories, and due dates
@@ -19,6 +21,9 @@ Tailwind CSS
 Lucide React
 Vitest
 React Testing Library
+Express
+SQLite
+JWT and bcrypt
 🚀 Getting Started
 Prerequisites
 Node.js (LTS recommended)
@@ -27,12 +32,15 @@ Installation
 git clone <your-repository-url>
 cd <your-project-folder>
 npm install
+Copy-Item .env.example .env
 
 Run Development Server
 npm run dev
 
 
 Open the local URL shown in your terminal.
+
+The client runs at the Vite URL shown in the terminal and proxies `/api` to Express on port 3002. Create an account from the login screen. The SQLite database is created at `data/auth.sqlite`. Set distinct random `ACCESS_TOKEN_SECRET` and `REFRESH_TOKEN_SECRET` values in `.env`; keep that file private.
 
 📜 Available Scripts
 Command	Description
@@ -65,12 +73,12 @@ vite.config.ts
 
 Tasks and theme preferences are saved in browser localStorage.
 
+Todo lists are namespaced by account on the current browser and are not synchronized across devices. Passwords are hashed with bcrypt. Access JWTs expire after 15 minutes and stay in browser memory. Refresh JWTs expire after 7 days, use an HttpOnly, SameSite=Strict cookie, and rotate on refresh. Only hashes of refresh tokens are stored in SQLite. Logout revokes the current refresh session. Production requires both JWT secrets and uses Secure cookies; serve over HTTPS.
+
 Data persists after refreshing the page.
 Data is stored locally in the current browser.
 Data is not synchronized across devices.
 Clearing browser storage may permanently delete saved tasks.
-
-No backend or authentication is required.
 
 🧪 Testing
 

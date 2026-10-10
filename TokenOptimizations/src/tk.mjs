@@ -10,6 +10,7 @@ import { runCommand } from './lib/run.mjs';
 import { expandSpec, LEGEND } from './lib/spec.mjs';
 import { formatHints, locate } from './lib/locate.mjs';
 import { doctor, formatDoctor } from './lib/doctor.mjs';
+import { formatUsage, usageReport } from './lib/usage.mjs';
 
 const HELP = `tokenkit (tk) — keep Copilot's context small
 
@@ -20,6 +21,7 @@ const HELP = `tokenkit (tk) — keep Copilot's context small
   tk locate "<plain request>"   show the location hints the prompt hook would add (--why: scoring detail)
   tk budget [dir] [--ci]        audit always-on Copilot context; --ci exits 1 when over budget
   tk report [--days N]          tokens kept out of context, biggest tool outputs
+  tk usage [folder] [--json]    VS Code's recorded chat usage for a folder (works without tokenkit installed)
   tk doctor [repo]              check an installed repo: runs each hook with sample input; exit 1 on failure
   tk uninstall <repo>... [--dry-run]   remove what install added (keeps files you edited)
   tk install <repo>... [--force] [--dry-run]
@@ -89,6 +91,12 @@ async function main() {
         for (const line of uninstall(repo, { dryRun })) console.log(line);
       }
       if (!dryRun) console.log('\nNext: review with git status, commit, and reload VS Code.');
+      return 0;
+    }
+    case 'usage': {
+      const json = flag('--json');
+      const r = usageReport(argv[0] ?? process.cwd());
+      console.log(json ? JSON.stringify(r, null, 2) : formatUsage(r));
       return 0;
     }
     case 'doctor': {

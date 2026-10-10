@@ -5,5 +5,5 @@ import { afterEach, beforeEach } from 'vitest';
 afterEach(() => cleanup());
 
 beforeEach(() => {
-  localStorage.clear();
+  if (typeof localStorage !== 'undefined') localStorage.clear();
 });

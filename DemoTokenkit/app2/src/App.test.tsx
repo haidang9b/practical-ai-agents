@@ -1,13 +1,13 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
-import App from './App';
-import { TASKS_KEY } from './lib/taskStorage';
+import { TodoWorkspace } from './App';
+import { taskStorageKey } from './lib/taskStorage';
 
 describe('task manager', () => {
   it('creates a task and persists it locally', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    render(<TodoWorkspace user={{ id: 'test-user', email: 'test@example.com' }} onLogout={() => {}} />);
 
     await user.click(screen.getByRole('button', { name: /thêm công việc/i }));
     await user.type(screen.getByLabelText(/tên công việc/i), 'Gọi cho mẹ');
@@ -16,14 +16,14 @@ describe('task manager', () => {
     await user.click(screen.getByRole('button', { name: /tạo công việc/i }));
 
     expect(screen.getByRole('button', { name: 'Gọi cho mẹ' })).toBeInTheDocument();
-    await waitFor(() => expect(JSON.parse(localStorage.getItem(TASKS_KEY) ?? '[]')).toEqual(expect.arrayContaining([
+    await waitFor(() => expect(JSON.parse(localStorage.getItem(taskStorageKey('test-user')) ?? '[]')).toEqual(expect.arrayContaining([
       expect.objectContaining({ title: 'Gọi cho mẹ', category: 'Gia đình', completed: false }),
     ])));
   });
 
   it('marks a task complete and updates the dashboard', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    render(<TodoWorkspace user={{ id: 'test-user', email: 'test@example.com' }} onLogout={() => {}} />);
     const task = screen.getByRole('button', { name: 'Gửi bản đề xuất cho nhóm thiết kế' }).closest('.task-row');
     expect(task).not.toBeNull();
 

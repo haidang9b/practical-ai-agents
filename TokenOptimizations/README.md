@@ -10,6 +10,7 @@ cost of an agent session ≈ Σ over every model call (each agent step):
 Each agent step re-sends the whole conversation, so **a 10k-token test log isn't paid once; it rides along on every later step**. tokenkit removes the expensive parts automatically, and gives you habits and a task notation for the rest.
 
 > **Install it: [docs/INSTALL.md](docs/INSTALL.md)** (step by step, about 10 minutes).
+> **Measure it: [docs/COMPARE.md](docs/COMPARE.md)** (a fair with/without comparison, token-heavy prompts, `tk usage`).
 > **Understand it: [docs/GUIDE.md](docs/GUIDE.md)** explains how every part works (hooks, compressor, repo map, TaskSpec), daily use, configuration and troubleshooting.
 
 **Primary target: the VS Code Copilot extension (agent mode).** Everything also works in Copilot CLI and the cloud agent if your org enables them, and degrades gracefully if your org disables hooks.
@@ -136,6 +137,6 @@ src/                 runtime, vendored into <repo>/.tokenkit/
   hooks/             guard.mjs (pre), post.mjs (post), session.mjs (start)
   lib/               compress, repomap, spec (TaskSpec), budget, report, rules, install, hookio
 templates/           files installed into each repo (.github/…, .vscode/settings.json)
-docs/                INSTALL.md (step by step), GUIDE.md (how it works + how to use), PLAYBOOK.md (habits), TASKSPEC.md
+docs/                INSTALL.md (step by step), COMPARE.md (measure with/without), GUIDE.md (how it works + how to use), PLAYBOOK.md (habits), TASKSPEC.md
 test/                node --test suites (npm test)
 ```

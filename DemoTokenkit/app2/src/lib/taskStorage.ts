@@ -3,6 +3,10 @@ import type { Task } from '../types';
 export const TASKS_KEY = 'viec-nho.tasks.v1';
 export const THEME_KEY = 'viec-nho.theme.v1';
 
+export function taskStorageKey(owner?: string): string {
+  return owner ? `${TASKS_KEY}:${owner}` : TASKS_KEY;
+}
+
 const starterTasks: Task[] = [
   {
     id: 'starter-1',
@@ -36,9 +40,9 @@ const starterTasks: Task[] = [
   },
 ];
 
-export function loadTasks(): Task[] {
+export function loadTasks(owner?: string): Task[] {
   try {
-    const stored = localStorage.getItem(TASKS_KEY);
+    const stored = localStorage.getItem(taskStorageKey(owner));
     if (stored === null) return starterTasks;
     const parsed: unknown = JSON.parse(stored);
     return Array.isArray(parsed) ? (parsed as Task[]) : starterTasks;
@@ -47,8 +51,8 @@ export function loadTasks(): Task[] {
   }
 }
 
-export function saveTasks(tasks: Task[]): void {
-  localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
+export function saveTasks(tasks: Task[], owner?: string): void {
+  localStorage.setItem(taskStorageKey(owner), JSON.stringify(tasks));
 }
 
 export function loadTheme(): 'light' | 'dark' {

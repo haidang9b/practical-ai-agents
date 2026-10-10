@@ -10,6 +10,7 @@ import {
   Clock3,
   Command,
   ListFilter,
+  LogOut,
   Moon,
   MoreHorizontal,
   Pencil,
@@ -21,6 +22,8 @@ import {
   X,
 } from 'lucide-react';
 import { loadTasks, loadTheme, saveTasks, THEME_KEY } from './lib/taskStorage';
+import AuthScreen from './components/AuthScreen';
+import { refreshSession, restoreSession, signOut, type AuthSession, type AuthUser } from './lib/authApi';
 import type { Priority, Task, TaskDraft, TaskSort, TaskStatus } from './types';
 
 const emptyDraft: TaskDraft = {
@@ -42,8 +45,13 @@ function dateLabel(date: string): string {
   return new Intl.DateTimeFormat('vi-VN', { day: 'numeric', month: 'short' }).format(new Date(`${date}T12:00:00`));
 }
 
-function App() {
-  const [tasks, setTasks] = useState<Task[]>(loadTasks);
+interface TodoWorkspaceProps {
+  user: AuthUser;
+  onLogout: () => void;
+}
+
+export function TodoWorkspace({ user, onLogout }: TodoWorkspaceProps) {
+  const [tasks, setTasks] = useState<Task[]>(() => loadTasks(user.id));
   const [theme, setTheme] = useState<'light' | 'dark'>(loadTheme);
   const [status, setStatus] = useState<TaskStatus>('all');
   const [query, setQuery] = useState('');
@@ -54,8 +62,8 @@ function App() {
   const [draft, setDraft] = useState<TaskDraft>(emptyDraft);
 
   useEffect(() => {
-    saveTasks(tasks);
-  }, [tasks]);
+    saveTasks(tasks, user.id);
+  }, [tasks, user.id]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -175,7 +183,11 @@ function App() {
       <main className="main-content" id="home">
         <header className="topbar">
           <div className="breadcrumb"><span>Không gian</span><span className="breadcrumb-slash">/</span><strong>Công việc</strong></div>
-          <div className="topbar-date"><CalendarDays size={15} />{today}</div>
+          <div className="topbar-tools">
+            <div className="topbar-date"><CalendarDays size={15} />{today}</div>
+            <span className="user-email" title={user.email}>{user.email}</span>
+            <button className="logout-button" onClick={onLogout} aria-label="Đăng xuất" title="Đăng xuất"><LogOut size={16} /></button>
+          </div>
         </header>
 
         <section className="page-intro">
@@ -292,4 +304,40 @@ function App() {
   );
 }
 
-export default App;
+export default function App() {
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    restoreSession()
+      .then((savedSession) => { if (active) setSession(savedSession); })
+      .catch(() => { if (active) setSession(null); })
+      .finally(() => { if (active) setReady(true); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    const timer = window.setInterval(() => {
+      refreshSession().then(setSession).catch(() => setSession(null));
+    }, 12 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [session]);
+
+  async function logout() {
+    try {
+      await signOut();
+    } finally {
+      setSession(null);
+    }
+  }
+
+  if (!ready) {
+    return <main className="auth-loading"><span className="brand-mark"><CheckCheck size={19} /></span><p>Đang mở không gian của bạn...</p></main>;
+  }
+
+  return session
+    ? <TodoWorkspace key={session.user.id} user={session.user} onLogout={logout} />
+    : <AuthScreen onAuthenticated={setSession} />;
+}

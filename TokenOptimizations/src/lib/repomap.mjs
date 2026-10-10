@@ -113,7 +113,9 @@ export function listFiles(root) {
     const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {
       cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore']
     });
-    return out.split('\0').filter(Boolean);
+    const listed = out.split('\0').filter(Boolean);
+    if (listed.length) return listed;
+    // Empty answer (e.g. the folder is ignored by a parent repo): scan instead.
   } catch { /* not a git repo: walk */ }
   const files = [];
   const walk = (dir) => {
@@ -174,6 +176,26 @@ export function buildMap(root, opts = {}) {
     const tokens = estimateTokens(text);
     if (tokens <= cfg.maxTokens || level === 4) return { text, tokens, level, files: files.length };
   }
+}
+
+// Stale = missing, older than maxAgeMinutes, a different number of source files
+// than it lists, or any source file modified after it was written. Cheap: one
+// file listing plus a stat per source file, no file reads.
+export function mapIsStale(root, mapFile, maxAgeMinutes = loadConfig().map.maxAgeMinutes) {
+  let mapTime, header;
+  try {
+    mapTime = statSync(mapFile).mtimeMs;
+    header = readFileSync(mapFile, 'utf8').split('\n', 1)[0];
+  } catch { return 'missing'; }
+  if (Date.now() - mapTime > maxAgeMinutes * 60_000) return 'old';
+  const sources = listFiles(root).filter((p) => BY_EXT.has(extname(p).toLowerCase()) && !GENERATED.test(p)
+    && !p.split('/').some((seg) => SKIP_DIRS.has(seg)));
+  const listed = Number((/· (\d+) source files/.exec(header) || [])[1]);
+  if (Number.isFinite(listed) && Math.abs(listed - sources.length) > 0) return 'file count changed';
+  for (const p of sources) {
+    try { if (statSync(join(root, p)).mtimeMs > mapTime) return 'files changed'; } catch { /* deleted */ }
+  }
+  return null;
 }
 
 export function writeMap(root, outFile, opts) {

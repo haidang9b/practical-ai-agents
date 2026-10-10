@@ -123,7 +123,7 @@ your-repo/
  └───────────────────────────────────────────────────────────────────────────┘
 
  Once per session, before the loop: sessionStart hook ─► session.mjs refreshes
- .tokenkit/repomap.md if it is older than 60 minutes (adds nothing to the prompt).
+ .tokenkit/repomap.md if it is stale (adds nothing to the prompt).
 ```
 
 ---
@@ -297,7 +297,7 @@ To retry rewriting after a VS Code update, delete `.tokenkit/logs/state.json`.
 
 ### 4.6 The session hook (`hooks/session.mjs`, sessionStart)
 
-Rebuilds `.tokenkit/repomap.md` if it is missing or older than 60 minutes (`map.maxAgeMinutes`). It returns nothing, so the start of every prompt stays identical across sessions, which keeps the prompt cache warm.
+Rebuilds `.tokenkit/repomap.md` if it is stale: missing, older than 60 minutes (`map.maxAgeMinutes`), listing a different number of source files, or older than any source file. The prompt hook runs the same check before matching, so files the agent created a minute ago are already in the map. It returns nothing, so the start of every prompt stays identical across sessions, which keeps the prompt cache warm.
 
 ### 4.7 The prompt hook: plain-language requests
 
@@ -634,6 +634,7 @@ Prefer `@path:range` over VS Code's `#file:` for big files. `#file` pastes the w
 | `node .tokenkit/tk.mjs report` | Weekly, to see savings and the next thing to tune |
 | `node <toolkit>/src/tk.mjs install <repo>` | To add or upgrade tokenkit in a repo |
 | `node .tokenkit/tk.mjs doctor` | Health check: runs every hook with sample input |
+| `node <toolkit>/src/tk.mjs usage <folder>` | VS Code's own record of chat sessions for a folder (tool calls, context size, prompt breakdown, credits); works without tokenkit, so use it to compare ([COMPARE.md](COMPARE.md)) |
 | `node <toolkit>/src/tk.mjs uninstall <repo>` | Remove what install added (keeps files you edited) |
 
 ### Where to look when you need the full output

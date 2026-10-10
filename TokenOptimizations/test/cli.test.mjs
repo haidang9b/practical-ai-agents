@@ -188,6 +188,22 @@ test('uninstall removes only what install added and keeps user content and edits
   assert.equal(readFileSync(join(dir, '.gitignore'), 'utf8'), 'node_modules/\n');
 });
 
+test('regression: files added after install are mapped on the next prompt (was: empty map for an hour)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tk-stale-'));
+  assert.equal(tk(['install', dir]).status, 0);
+  assert.match(readFileSync(join(dir, '.tokenkit', 'repomap.md'), 'utf8'), /· 0 source files/);
+  // The app is created after install, e.g. by the agent itself.
+  mkdirSync(join(dir, 'src', 'lib'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'lib', 'taskStorage.ts'), 'export function loadTasks() {\n  return [];\n}\n\nexport function saveTasks(tasks: unknown[]) {\n}\n');
+  const r = spawnSync(process.execPath, [join(dir, '.tokenkit', 'hooks', 'prompt.mjs')], {
+    input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt: 'saved tasks disappear after reload', cwd: dir }),
+    encoding: 'utf8', env: { ...process.env, TOKENKIT_LOG_DIR: mkdtempSync(join(tmpdir(), 'tk-stale-logs-')) }
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(readFileSync(join(dir, '.tokenkit', 'repomap.md'), 'utf8'), /· 1 source files/);
+  assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /src\/lib\/taskStorage\.ts:\d+-\d+ {2}(saveTasks|loadTasks)/);
+});
+
 test('mergeBlock replaces an existing block in place', () => {
   const tpl = 'x\n<!-- tokenkit:start -->\nNEW\n<!-- tokenkit:end -->\n';
   const cur = 'a\n<!-- tokenkit:start -->\nOLD\n<!-- tokenkit:end -->\nb\n';

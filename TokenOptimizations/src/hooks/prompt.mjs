@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { KIT_DIR, loadConfig } from '../lib/config.mjs';
 import { logEvent, runHook } from '../lib/hookio.mjs';
 import { formatHints, locate } from '../lib/locate.mjs';
+import { mapIsStale, writeMap } from '../lib/repomap.mjs';
 import { expandSpec, parseSpec } from '../lib/spec.mjs';
 import { estimateTokens } from '../lib/tokens.mjs';
 
@@ -31,6 +32,11 @@ runHook(async (payload) => {
     logEvent('prompt.jsonl', { kind: 'taskspec', tokens: estimateTokens(text) });
     return emitContext(text);
   }
+
+  // Files often appear mid-session (the agent just created them): refresh first.
+  const mapFile = join(KIT_DIR, 'repomap.md');
+  const stale = mapIsStale(root, mapFile);
+  if (stale) writeMap(root, mapFile);
 
   const r = locate(prompt, root, { maxHints: cfg.maxHints, minScore: cfg.minScore });
   if (!r.hints.length) return logEvent('prompt.jsonl', { kind: 'none', reason: r.reason });
