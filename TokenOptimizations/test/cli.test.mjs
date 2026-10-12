@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { audit } from '../src/lib/budget.mjs';
 import { mergeBlock } from '../src/lib/install.mjs';
 import { expandSpec, FLAGS, LEGEND, parseSpec } from '../src/lib/spec.mjs';
+import { detectChecks } from '../src/lib/verify.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const TK = join(ROOT, 'src', 'tk.mjs');
@@ -218,6 +219,33 @@ test('tk verify runs every check in one call and reports each', () => {
   assert.match(r.stdout, /\[tk\] verify: typecheck OK · lint FAILED · test OK$/m);
   assert.doesNotMatch(r.stdout, /case 7/, 'passing output is not printed');
   assert.doesNotMatch(r.stdout, /dev/);
+});
+
+test('tk verify finds frontend and backend projects under src/ and --in narrows to one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tk-verify-multi-'));
+  const put = (rel, body) => { mkdirSync(join(dir, rel, '..'), { recursive: true }); writeFileSync(join(dir, rel), body); };
+  put('src/Frontend/package.json', JSON.stringify({ scripts: { lint: 'node -e "process.exit(0)"', test: 'node -e "require(\'fs\').accessSync(\'package.json\')"' } }));
+  put('src/Frontend/src/features/cart/Cart.tsx', 'export function Cart() {}\n');
+  put('src/Backend/Contoso.sln', '');
+  put('src/Backend/Contoso.Api/Contoso.Api.csproj', '<Project />');
+  put('tools/package.json', JSON.stringify({ workspaces: ['pkgs/*'], scripts: { test: 'node -e 0' } }));
+  put('tools/pkgs/a/package.json', JSON.stringify({ scripts: { test: 'node -e 0' } }));
+  const checks = detectChecks(dir).map((c) => `${c.name}=${c.cmd}`);
+  assert.deepEqual(checks, [
+    'src/Backend:build=dotnet build Contoso.sln -v q',
+    'src/Backend:test=dotnet test Contoso.sln -v q --no-build',
+    'src/Frontend:lint=npm run lint',
+    'src/Frontend:test=npm run test',
+    'tools:test=npm run test'
+  ], 'one solution covers its projects; a workspace root covers its packages');
+
+  assert.equal(tk(['install', dir]).status, 0);
+  const verify = (...args) => spawnSync(process.execPath, [join(dir, '.tokenkit', 'tk.mjs'), 'verify', ...args], { encoding: 'utf8', env: { ...process.env, TOKENKIT_LOG_DIR: LOGS } });
+  // A folder inside the frontend picks the frontend; its test only passes when run from src/Frontend.
+  const r = verify('--in', 'src/Frontend/src/features');
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /\[tk\] verify: src\/Frontend:lint OK · src\/Frontend:test OK$/m);
+  assert.equal(verify('--in', 'docs').status, 2);
 });
 
 test('re-install retires files an older tokenkit installed and keeps edited ones', () => {

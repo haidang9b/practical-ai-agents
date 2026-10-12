@@ -21,7 +21,7 @@ Each agent step re-sends the whole conversation, so **a 10k-token test log isn't
 |---|---|---|---|
 | **Instructions block** | ~226 always-on tokens: steps cost most, locate-then-read, verify once with `tk verify`, no dev servers/browsers unless asked, bounded commands, terse replies. | ✓ | ✓ |
 | **2 skills** | `lean-explore`, `lean-verify`. About 50 tokens each always-on (name + description); bodies load only when relevant. | ✓ | ✓ |
-| **`tk verify`** | Typecheck, lint and tests in **one** call, printing only failures. Fewer agent steps is the biggest saving on small projects. | ✓ | ✓ |
+| **`tk verify`** | Typecheck, lint and tests in **one** call, printing only failures. Fewer agent steps is the biggest saving on small projects. Finds every project in the repo (`src/Frontend`, `src/Backend/*.sln`, nested repos); `--in <dir>` checks just one. | ✓ | ✓ |
 | **`lean` agent** | Minimal toolset (tool schemas are input tokens on every call), terse replies, optional cheap-model pin. | ✓ | — |
 | **`/q`, `/handoff`, `/spec`, `/audit`** | `/q` is a small model with no tools. `/handoff` writes a 25-line checkpoint so you can start a fresh session. `/spec` runs a TaskSpec. | ✓ | — |
 | **TaskSpec** | One-line notation (`fix @src/a.ts#login null user +test >diff`) that front-loads scope, constraints and answer shape. See [docs/TASKSPEC.md](docs/TASKSPEC.md). | ✓ | ✓ |
@@ -30,7 +30,7 @@ Each agent step re-sends the whole conversation, so **a 10k-token test log isn't
 | **post hook** (post-tool) | Logs every tool output's size for `tk report`. In the CLI it also replaces oversized output with a compressed version. | logs only¹ | ✓ compresses |
 | **session hook** | Refreshes `.tokenkit/repomap.md` when stale. Injects nothing, so the prompt cache stays warm. | ✓ | ✓ |
 | `tk run` | Output compressor: errors with context, head, summary tail. Drops passing tests, progress bars and library frames, and keeps the full log. | ✓ | ✓ |
-| **repo map** | Grep-able `path \| Symbol:line` index (≤4k tokens). One grep replaces several search/list/read calls. | ✓ | ✓ |
+| **repo map** | Grep-able `path \| Symbol:line` index of every source file. One grep replaces several search/list/read calls. Large repos keep full detail (grep-only) plus a ≤4k-token folder overview; rebuilds re-read only changed files. | ✓ | ✓ |
 | `tk budget` / `tk report` | Measures always-on context, lints instruction bloat and MCP sprawl, and shows tokens kept out of context. | ✓ | ✓ |
 
 ¹ VS Code's PostToolUse hook cannot replace tool output (documented). In VS Code, compression comes from the guard routing commands through `tk run`, plus `chat.tools.compressOutput.enabled` (Preview), which the installer's settings template turns on.
@@ -90,11 +90,30 @@ The installer:
 
 VS Code hooks are Preview, and enterprise policy can disable them. Everything except automatic enforcement still works: the instructions and skills make the agent route commands through `tk run`, use the repo map, read ranges and answer tersely. You lose only the safety net for when it forgets. `tk report` then shows `tk run` savings only, since tool sizes are logged by the hook. Hook commands are written to **fail open**: if `node` or `.tokenkit/` is missing they exit 0 silently, so nothing gets blocked.
 
+## Large repos, frontend + backend, and several repos
+
+tokenkit works on the folder you open in VS Code. That folder can be:
+
+| Layout | Install into | What you get |
+|---|---|---|
+| One repo with frontend and backend under `src/` | the repo | One map for both. `tk verify` runs the `src/Frontend` and `src/Backend` checks; `tk verify --in src/Frontend` runs only one. |
+| Several repos side by side (`D:\code\shop\web`, `D:\code\shop\api`) | the parent folder (`D:\code\shop`), opened as one VS Code folder | One map across all repos, with each repo's own `.gitignore` respected. Location hints can point into the frontend and the backend at once. `tk verify --in web` checks one repo. |
+| Several repos, each opened on its own | each repo: `tk install D:\code\web D:\code\api` | Independent installs, committed with each repo. |
+
+If the parent folder is not a git repo, its `.github/` and `.tokenkit/` stay on your machine (`tk doctor` warns about this). Install into each repo as well if teammates need them. VS Code multi-root workspaces (`.code-workspace`) are untested; open the parent folder instead.
+
+**Large repos** (thousands of files, e.g. a 9,000-file C# solution) need no setup:
+- The map keeps every file's symbols. Past `map.maxTokens` it is grep-only (the guard blocks reading it whole), and `.tokenkit/areas.md` gives a folder overview within that budget.
+- Map rebuilds re-read only changed files (cache in `.tokenkit/cache/`). On a synthetic 10,500-file repo (9,000 C#, 1,500 TSX), the prompt hook takes about 1.5 s of its 10 s limit.
+- `tk doctor` times each hook against its VS Code timeout, with a stale map, so you see a slow hook before VS Code cancels it.
+- Leave out code nobody should edit: `"map": { "exclude": ["/Migrations/", "^src/Legacy/"] }`.
+
 ## Everyday commands
 
 ```text
-node .tokenkit/tk.mjs run -- npm test        compressed run (the full log stays in .tokenkit/logs/last.log)
+node .tokenkit/tk.mjs run -- npm test        compressed run (full log: the run-*.log named in the header)
 <cmd> 2>&1 | node .tokenkit/tk.mjs filter    compress any piped output
+node .tokenkit/tk.mjs verify [--in src/Frontend]   all checks in one call (only one project with --in)
 node .tokenkit/tk.mjs map                    rebuild the repo map
 node .tokenkit/tk.mjs spec "fix @src/cart.js#applyDiscount pct is a percent +test >diff"
 node .tokenkit/tk.mjs locate --why "the discount is applied twice"   preview the prompt hook's hint
@@ -111,19 +130,23 @@ node .tokenkit/tk.mjs report [--days 7]      what the hooks saved, biggest tool 
   "run":   { "maxLines": 80, "tailLines": 20, "noise": ["^Some noisy banner"], "errors": ["^MYAPP-E\\d+"] },
   "post":  { "minTokens": 1500 },
   "map":   { "maxTokens": 4000, "exclude": ["^legacy/"] },
+  "verify": { "checks": [{ "label": "api:test", "cwd": "src/Backend", "cmd": "dotnet test Contoso.sln -v q" }] },
   "budget": { "alwaysOnTokens": 1200 }
 }
 ```
 
 - `guard.commands`: `auto` means deny-with-command in VS Code and rewrite in the CLI. The other values are `rewrite`, `deny` and `off`.
 - `guard.shell`: `auto` assumes PowerShell on Windows. Set `bash` if your VS Code integrated terminal is Git Bash.
+- `map.maxTokens`: above this the map is grep-only and `.tokenkit/areas.md` holds a folder overview within this budget.
+- `verify.checks`: when set, `tk verify` runs exactly these (each in its `cwd`) instead of detecting projects.
 
 ## Design notes and limits
 
 - **Never auto-approves.** The guard only denies, or rewrites without a permission decision, so your normal approval flow always applies.
 - **Fail-open.** Hooks exit 0 and swallow their own errors. One command string (`node -e "import('./.tokenkit/hooks/x.mjs').catch(()=>0)"`) was tested under cmd, PowerShell, bash and sh, and it exits 0 silently when the runtime is missing.
 - **Not wrapped:** long-running commands (`--watch`, `dev`, `serve`, `start`, background terminals) and anything already piped or redirected.
-- **Nothing is lost.** Every compressed output keeps its full original in `.tokenkit/logs/`, and the model is told to grep it, not read it whole.
+- **Nothing is lost.** Every compressed output keeps its full original in its own `.tokenkit/logs/run-*.log`, named in the `[tk]` header, and the model is told to grep it, not read it whole.
+- **Errors are never traded for brevity.** Every distinct error line and its `file:line` (the C# stack frame after `Actual: 81`, the jest `(src/x.test.tsx:11:21)`) has its own budget (`run.maxErrorLines`, 150), separate from the 80-line cap for context. Only redundancy is removed: passing tests, progress, library frames, MSBuild's repeated summary, and the same error repeated in hundreds of files (shown 3 times, then counted). Anything cut is named in the `[tk]` notes, with counts, error codes and file counts.
 - **Non-terminal tools in VS Code.** Tasks (`execute/createAndRunTask`), `execute/testFailure` and MCP tools don't go through the terminal. Their output can't be compressed in VS Code; it is only logged. The `lean-verify` skill steers the agent to terminal runs through `tk`.
 - **Estimates.** Token counts are a dependency-free heuristic (±20%). The repo map uses regex extraction (TS/JS, Python, Go, C#, Java/Kotlin, Rust, PHP, Ruby), not a parser.
 - **Preview surfaces.** VS Code hooks are Preview and field names may change. `src/lib/hookio.mjs` is the one place that knows both payload dialects (VS Code snake_case, CLI camelCase).

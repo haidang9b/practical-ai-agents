@@ -224,8 +224,8 @@ Every hook follows the same skeleton, `runHook` (`hookio.mjs:88`):
 
 ### 4.1 `sessionStart` (`hooks/session.mjs`)
 
-1. Call `mapIsStale(root, mapFile)` (`repomap.mjs:184`).
-2. If the map is stale, call `writeMap` and log the reason to `session.jsonl`.
+1. Call `mapIsStale(root, mapFile)` (`repomap.mjs:242`).
+2. If the map is stale, call `writeMap` (incremental: only changed files are re-read, section 9.4) and log the reason to `session.jsonl`.
 3. Print nothing. The hook exists to keep the map fresh, not to add context.
 
 ### 4.2 `userPromptSubmitted` (`hooks/prompt.mjs`)
@@ -296,12 +296,12 @@ So `estimate(text) = Σ_runs price(run)`. The code comment says it tracks `o200k
 
 ## 6. The output compressor
 
-`compress(raw, opts)` (`lib/compress.mjs:55`) turns a command's output into a short version that keeps what the agent needs to act. It is a pipeline of six phases.
+`compress(raw, opts)` (`lib/compress.mjs:72`) turns a command's output into a short version that keeps what the agent needs to act. It is a pipeline of six phases.
 
 ### 6.1 Phase 1: normalize
 
 - Strip ANSI escape sequences (colors, cursor moves).
-- Convert `\r\n` to `\n`. For a line that contains a bare `\r` (a progress bar that rewrites itself), keep only the last segment, which is the final state.
+- Convert `\r\n` to `\n`. For a line that contains a bare `\r` (a progress bar that rewrites itself), keep the last segment, which is the final state, plus any earlier segment that is an error. Otherwise `error: EADDRINUSE …\r building... 40%` would lose the error to the progress text.
 - Trim trailing whitespace and drop trailing empty lines.
 
 ### 6.2 Phase 2: classify each line
@@ -313,12 +313,16 @@ Each line gets exactly one of these outcomes, checked in this order:
 | 1 | `LIB_FRAME` (stack frames from `node_modules`, `node:internal`, JVM/.NET/Python site-packages, Rust std, Go runtime) | Collapsed into one marker `… N library frame line(s)` | `frames` |
 | 2 | `NOISE` (progress bars, `npm warn`, `Downloading …`, `Compiling … v1.2.3`, TAP metadata, and any user regex) | Dropped | `noise` |
 | 3 | `PASS` (`✓`, `PASS`, `ok 12 -`, `--- PASS:`, `test x ... ok`) **and the line does not contain `fail` or `error`** | Dropped | `passed` |
-| 4 | everything else | Kept | `warnings` if it matches `WARN` |
+| 4 | an error line with a source location (`ERROR` and `LOCATION`) that already appeared earlier | Dropped (shown once) | `repeats` |
+| 5 | everything else | Kept | `warnings` (distinct lines) if it matches `WARN` |
 
-Two details matter:
+Rule 4 exists for MSBuild, which prints every error during the build and again in its summary. Removing the second copy frees budget for other errors. Only lines with a `file:line` location are treated this way, so boilerplate such as `Error Message:` in each failed .NET test is not removed.
+
+Three details matter:
 
 - The `PASS` rule has an exception. A line such as `✓ handles error paths` contains `error`, so it is kept. Hiding a line that might say "failed" would be a dangerous mistake.
 - Python tracebacks print a code line after each `File "…"` line. When `LIB_FRAME` matches a `File` line inside a library, the next indented line (the source code of that frame) is collapsed too (`skipPyCode`).
+- `ERROR` (`compress.mjs:49`) recognizes more than the word "error". It also matches `fail`, `failing`, `exception`, `panic`, `traceback`, `assert…`, `expected`/`received`, exception class names (`ValueError:`, `System.InvalidOperationException:`), `aborted`, `crashed`, `timed out`, `unhandled`, `killed`, `out of memory`, `stack overflow`, Node error codes (`EADDRINUSE`, `ENOENT`, …), the `Actual:` and `But was:` halves of xUnit/NUnit assertions, and markers such as `✗`, `●` and `> 12 |`.
 
 Consecutive identical kept lines are merged with a repeat count: `line  (×8)`.
 
@@ -342,12 +346,15 @@ Let `rows` be the collapsed list, and `cap` the line limit:
 - On **failure** (`exitCode ≠ 0`): `head = 6`, `tail = 20`, `cap = maxLines = 80`.
 - On **success**: `head = 0`, `tail = successTail = 8`, `cap = 2 × successTail = 16`.
 
-If `rows.length ≤ cap`, keep everything. Otherwise:
+If `rows.length ≤ cap`, keep everything. Otherwise there are two budgets. Error lines and their locations have their own budget, `maxErrorLines` (150; on success, `successTail`). Head, tail and context share the line cap. So context can never push an error out.
 
 1. Keep the first `head` rows and the last `tail` rows.
-2. For each error row, in order, add a window of `±context` rows (`context = 2`) around it. A window is added only if `keep.size + window ≤ cap`. Otherwise the error is counted as dropped (`droppedErrorLines`), and the note tells the agent to grep the log.
+2. **Errors and their locations.** For each error row, in order, keep the row plus up to 3 `LOCATION` rows on each side: within 8 rows, and without crossing another error row. `LOCATION` (`compress.mjs:60`) matches a stack frame or compiler pointer to a file and line: `in X.cs:line 42`, `(src/a.test.tsx:11:21)`, `File "/app/x.py", line 4`, `Foo.java:12`, `--> src/main.rs:4:18`, `x.go:14:`. This is what keeps a failing .NET test's frame, which comes 3 rows after `Actual: 81`, beyond any ±2 window. It also keeps the innermost `File "…"` lines before a Python exception. Library frames never reach this step; phase 2 already collapsed them.
+3. **Fold repeated errors.** An error whose text, with its location removed, already appeared `FOLD_AFTER` (3) times is not shown again. It is counted per message, with the number of files. This is the "one renamed type, 400 files with CS0246" case. Without folding, 150 copies of one message would use up the budget, and a *different* error printed later would be cut.
+4. If the error budget runs out, the remaining error rows are counted (`droppedErrorLines`). The note names their error codes and how many files they are in.
+5. **Context.** For each kept error, in order, add a window of `±context` rows (`context = 2`), while the line cap allows. The first errors get context first, because they are usually the root cause and later ones are often cascades.
 
-The order encodes an assumption: **the first errors are usually the root cause, and later ones are often cascades.** So windows are granted first-come, first-served. The selection is greedy, not optimal, but it is O(n) and predictable.
+The selection is greedy, not optimal, but it is O(n) and predictable.
 
 ### 6.5 Phase 5: render with gap markers
 
@@ -355,7 +362,15 @@ The kept rows are emitted in order. Every gap is replaced by `… [N line(s) omi
 
 ### 6.6 Phase 6: report what was removed
 
-`notes` summarizes the removal: passing-test lines hidden, noise hidden, frames collapsed, warnings still in the log, and later errors cut. The caller prints these as `[tk] …`, so the agent knows what it did not see.
+`notes` summarizes the removal, so the agent knows what it did not see. The caller prints them as `[tk] …`. They cover:
+
+- passing-test lines hidden, noise hidden, library frames collapsed;
+- repeated error lines shown once;
+- warnings left in the log, with their most common codes (`60 warning line(s) in full log (CS8618 ×60)`);
+- folded errors, per message: `same error at 1478 more location(s) in 225 file(s): "error CS0246: The type or namespace name 'OrderDto' could not be found"`;
+- errors past the budget, with codes and file count: `24 more error line(s) not shown (TS2304 ×24) in 12 file(s); grep the log`.
+
+The `[tk]` header names the run's own log, `.tokenkit/logs/run-<timestamp>.log`. `last.log` is still written, but the next run overwrites it, and the agent may grep a failure several commands later.
 
 ### 6.7 A real example
 
@@ -379,11 +394,27 @@ Notes: `50 passing-test line(s) hidden`. Size: 254 lines and about 1,747 estimat
 - **Information theory in plain terms.** The output is mostly redundant (repeats, passing lines, frames). The compressor removes redundancy by pattern, and keeps the rare, surprising lines (errors) and the structural anchors (the head and the summary tail).
 - **Asymmetric caps.** Failures get a larger budget than successes, because a success needs only the summary and a failure needs the detail.
 - **Error windows.** An error line without its neighbors is often meaningless (`expected 3` without the test name). The ±2-line window keeps the context an error needs.
+- **Errors are not traded for tokens.** Cutting an error to save 30 tokens usually costs another full run, with the whole conversation re-sent, once the agent finds the rest. So distinct errors are kept up to `maxErrorLines`. Only redundancy is removed: repeats, folded copies of one message, and frames.
+
+Measured with the old compressor and the new one on the same inputs. The inputs are synthetic outputs shaped like real dotnet, tsc, jest and MSBuild runs; the same shapes are in `test/compress.test.mjs`. There is also one real `node --test` run. "Facts" are the strings an agent needs: each failing test's `file:line`, actual values, every distinct error, and the summary.
+
+| Output | Raw tokens | Old: tokens, facts kept | New: tokens, facts kept |
+|---|---|---|---|
+| `dotnet test`, 3 failures among 1,000 varied log lines | 25.7k | 959, 8/11 (every `OrderTests.cs:line N` lost) | 1,078, 11/11 |
+| jest, 12 failures in 665 lines | 8.9k | 582, 8/25 (every `file:line` lost) | 1,543, 25/25 |
+| tsc, 150 distinct errors | 4.7k | 2,437, 79/151 | 4,658, 151/151 |
+| MSBuild, 40 errors repeated in the summary, 60 warnings | 15.3k | 4,864, 42/42 | 3,443, 42/42 |
+| 2,001 errors, 2,000 of them one message | 81k | 3,231, the one distinct error lost | 3,398, distinct error kept |
+| error behind a `\r` progress update | 2.4k | 50, 0/1 | 66, 1/1 |
+| `node --test`, 251 tests, 1 failing | 9.7k | 313 | 313 (identical) |
 
 ### 6.9 Known heuristic limits
 
 - `ERROR` matches the word `error` anywhere, so a success summary such as `0 errors` counts as an error line and is kept. This is safe (it keeps more), but it is not minimal.
 - Rules are regular expressions tuned for common tools. An unusual tool with no matching rules is compressed by the generic phases only (collapse, head/tail).
+- An important line that matches neither `ERROR` nor `LOCATION`, more than 2 rows from any error, can still be cut from a long output. Add a `run.errors` pattern for it. The full log always has it.
+- Folding treats two errors as "the same" when their text is identical once the leading `path(line,col):` and a trailing `[project]` are removed. Errors that differ only in an identifier (`'v1'`, `'v2'`) are distinct and are all kept.
+- Logging frameworks' `warn:` lines are counted as warnings.
 - The `config.run.noise` and `config.run.errors` options let a project add its own rules.
 
 ---
@@ -452,22 +483,30 @@ The `--shell` argument keeps the command's syntax: `powershell` on Windows by de
 3. Set the environment: `CI=1` unless already set (many tools then skip interactive prompts and progress bars), `FORCE_COLOR=0`, and `NO_COLOR=1`.
 4. Buffer stdout and stderr together.
 5. Write the full output to `run-<timestamp>.log` and `last.log`, and rotate old run logs to `keepLogs` (10).
-6. Unless `--raw`, compress the output with the exit code and print a header: `[tk] OK in 3.2s · 1540→29 lines, ~10k→~300 tokens · full log: .tokenkit/logs/last.log`, followed by the notes and the compressed text.
+6. Unless `--raw`, compress the output with the exit code and print a header: `[tk] OK in 3.2s · 1540→29 lines, ~10k→~300 tokens · full log: .tokenkit/logs/run-<timestamp>.log`, followed by the notes and the compressed text.
 7. Append one JSON line to `runs.jsonl` (raw and kept tokens), for `tk report`.
 
 Two details: `timeoutSec` defaults to 0 (no timeout), and a child that fails to start is reported as exit 127 with its error message in the log.
 
 ### 8.2 `tk verify`
 
-`verify` (`lib/verify.mjs:52`) runs every standard check in one call, so the agent makes one tool call instead of several. `detectChecks` (`verify.mjs:23`) chooses the commands:
+`verify` (`lib/verify.mjs:117`) runs every standard check in one call, so the agent makes one tool call instead of several.
+
+**Finding projects.** `findProjects` (`verify.mjs:41`) looks for project manifests in the repo root and in subfolders up to 4 levels deep, using the same file list as the repo map (so `.gitignore`, `node_modules` and nested repos are handled the same way). A repo with `src/Frontend/package.json` and `src/Backend/Contoso.sln` has two projects. A manifest that an ancestor already covers is dropped: `.csproj` files under a folder with a `.sln`, packages under a JS workspace root (`"workspaces"` or `pnpm-workspace.yaml`), and crates under a `[workspace]` `Cargo.toml`.
+
+**Choosing commands.** `detectChecks` (`verify.mjs:101`) gives each project folder the checks for every kind of manifest it holds:
 
 - **Node projects** (`package.json`): look up script names in priority order. Typecheck: `typecheck`, `type-check`, `tsc`, `check-types`, `types`. Lint: `lint`. Test: `test`, `test:unit`, `unit`. Build (only with `--build`): `build`. Scripts with `watch` in them are skipped. The package manager is taken from the lockfile (`pnpm-lock.yaml`, `yarn.lock`, `bun.lock[b]`, otherwise npm).
 - **Python** (`pyproject.toml`, `pytest.ini`, `setup.py`): `python -m pytest -q`.
 - **Go** (`go.mod`): `go vet ./...`, `go test ./...`.
 - **Rust** (`Cargo.toml`): `cargo check -q`, `cargo test -q`.
-- **.NET** (`.sln`, `.csproj`, `.fsproj`): `dotnet build -v q`, `dotnet test -v q --no-build`.
+- **.NET** (`.sln`, `.slnx`, `.csproj`, `.fsproj`): `dotnet build <file> -v q`, `dotnet test <file> -v q --no-build`. The file is named because `dotnet build` refuses a folder that holds more than one project or solution. When a build fails, its `--no-build` test is reported as `SKIPPED (build failed)` instead of repeating the build errors.
 
-Each check runs through `runCommand` with `quietOk`, so a passing check prints only its one-line header, and a failing one prints its compressed output. The exit code is 1 if any check fails. The final line is a summary: `[tk] verify: typecheck OK · lint OK · test FAILED`.
+A non-empty `verify.checks` in the config replaces detection: `[{ "label": "api:test", "cwd": "src/Backend", "cmd": "dotnet test Contoso.sln -v q" }]`.
+
+Each check runs in its project folder through `runCommand` with `quietOk`, so a passing check prints only its one-line header, and a failing one prints its compressed output. The exit code is 1 if any check fails. The final line is a summary: `[tk] verify: typecheck OK · lint OK · test FAILED`. Checks outside the repo root carry their folder: `src/Frontend:test OK · src/Backend:build FAILED`.
+
+**`--in <dir>`** keeps the projects inside `dir`; when `dir` lies inside one project (`--in src/Frontend/src/cart`), it keeps that project. A frontend edit then doesn't build a 9,000-file solution.
 
 ---
 
@@ -477,18 +516,27 @@ The repo map (`.tokenkit/repomap.md`) is a one-line-per-file symbol index that t
 
 ### 9.1 Building the file list
 
-`listFiles` (`repomap.mjs:111`) asks git for tracked and untracked-but-not-ignored files: `git ls-files --cached --others --exclude-standard`. That respects `.gitignore` for free. If the folder is not a git repository, or the answer is empty (for example, when a parent repository ignores the folder), it walks the directory tree and skips `.git`, `node_modules`, `dist`, `build`, `target`, virtual environments, caches, and other directories in `SKIP_DIRS`.
+`listFiles` (`repomap.mjs:117`) asks git for tracked and untracked-but-not-ignored files: `git ls-files --cached --others --exclude-standard`. That respects `.gitignore` for free. If the folder is not a git repository, or the answer is empty (for example, when a parent repository ignores the folder), it walks the directory tree and skips `.git`, `node_modules`, `dist`, `build`, `target`, virtual environments, caches, and other directories in `SKIP_DIRS`.
 
-`buildMap` (`repomap.mjs:143`) then keeps files that:
+**Nested repositories** are listed through their own git, so their own `.gitignore` applies:
 
-- have an extension in the language table (`LANGS`, `repomap.mjs:18`): JavaScript and TypeScript family, Python, Go, C#, Java, Kotlin, Scala, Rust, PHP, Ruby;
+- git shows an untracked repository inside the repo as one `dir/` entry; `listFiles` recurses into it;
+- submodules (paths in `.gitmodules`) are expanded the same way;
+- while walking a plain folder, a subfolder with a `.git` entry is listed with git instead of walked.
+
+That is what lets one install cover a folder that holds a frontend repo and a backend repo. A nested repo that the parent's `.gitignore` ignores is not listed.
+
+`sourceFiles` (`repomap.mjs:168`) then keeps files that:
+
+- have an extension in the language table (`LANGS`, `repomap.mjs:21`): JavaScript and TypeScript family, Python, Go, C#, Java, Kotlin, Scala, Rust, PHP, Ruby;
 - are not generated (`.min.js`, `.d.ts`, `.g.cs`, `_pb2.py`, `.pb.go`, and similar, `GENERATED`);
-- are not in `config.map.exclude`;
-- are at most `maxFileKB` (256 KB).
+- are not in `config.map.exclude`.
+
+`buildMap` (`repomap.mjs:178`) extracts symbols from each. Files over `maxFileKB` (256 KB) and unreadable files are listed by path only. They are still counted, which matters for staleness (section 9.4).
 
 ### 9.2 Extracting symbols
 
-`extractSymbols(text, ext)` (`repomap.mjs:78`) is a **line scanner with regular expressions**, not a parser. For each line it tries:
+`extractSymbols(text, ext)` (`repomap.mjs:81`) is a **line scanner with regular expressions**, not a parser. For each line it tries:
 
 1. **Top-level patterns** (`lang.top`). For JavaScript: `export function|class|const …`, `function name`, `class name`, `const name = (…) =>`, `module.exports.name =`. For Python: `class`, `def`. For Go: `func (recv) name`, `func name`, `type name`. And similarly for the other languages. The first match records `{name, line}` and sets the **class state** `inClass` if the line opens a class.
 2. **Method patterns** (`lang.method`), only inside a class body (or always for C#, Java, and Kotlin, which declare methods with modifiers). A method is recorded as `.name:line`, up to `MAX_METHODS = 15` per file, and keywords such as `if`, `for`, `return` are excluded.
@@ -498,34 +546,55 @@ The output for one file is one line: `src/lib/rules.mjs | VERBOSE:7 BOUNDED:24 w
 
 Limits of this approach: multi-line signatures, code generated at runtime, and unusual formatting can be missed. The map is a **hint index**, and the instructions tell the agent to read the range and confirm.
 
-### 9.3 Fitting a token budget: degradation levels
+### 9.3 Large repos: a grep-only map and a folder overview
 
-The map must stay small, because it is re-read by the agent. `buildMap` tries detail levels from richest to poorest and stops at the first that fits `maxTokens` (4000):
+The agent is told to **grep** the map, never to read it whole, and the guard denies whole-file reads over `guard.maxReadKB` (48 KB). So the map always lists every source file with full detail, whatever its size. The header records the size: `# Repo map · 10501 source files · ~1.3M tokens · …`.
 
-| Level | What is kept | Typical use |
-|---|---|---|
-| 0 | every symbol and method | small and medium repos |
-| 1 | top-level symbols only (no methods) | larger repos |
-| 2 | level 1, and test files listed by path only | repos with many tests |
-| 3 | paths only | very large repos |
-| 4 | directory counts (`src/lib/ (14 files)`) | huge repos; always accepted |
+Earlier versions dropped detail to fit `maxTokens` (4,000) instead: no methods, then paths only, then directory counts. That breaks down on large repos. 10,000 files don't fit in 4,000 tokens even as bare paths (about 150k tokens), so such a map fell to directory counts, which answer neither "which file" nor "which line". The location matcher (section 10) also found nothing to match.
 
-The loop is `for level in 0..4: text = render(level); if tokens(text) ≤ maxTokens or level = 4: return`. The header records the level (`detail level 0/4`), so the reader knows how much is missing. Degradation is a **graceful loss of resolution**: a coarser map still answers "which directory", even when it no longer answers "which line".
+Above `maxTokens`, two things change:
+
+- The map's second header line says it is too big to read whole, and points to the overview.
+- `buildOverview` (`repomap.mjs:215`) writes `.tokenkit/areas.md`, a folder overview within `maxTokens`. It lists folders with their file counts and first subfolders, at the deepest folder depth that fits the budget:
+
+```text
+# Folder overview · 10501 source files · symbols: grep .tokenkit/repomap.md
+src/Backend/Contoso.Billing/ (450 files): Commands Configurations Controllers Dtos Entities … (+3)
+src/Frontend/src/ (1500 files): features
+```
+
+The overview answers "which area"; a grep of the map answers "which file and line". Small repos are unchanged: one map, no overview.
 
 ### 9.4 Staleness
 
-`mapIsStale(root, mapFile)` (`repomap.mjs:184`) returns a reason string, or `null` when the map is fresh. It checks, in order, and stops at the first hit:
+`mapIsStale(root, mapFile)` (`repomap.mjs:242`) returns a reason string, or `null` when the map is fresh. It checks, in order, and stops at the first hit:
 
 1. The map is missing, or cannot be read: `missing`.
-2. The map is older than `maxAgeMinutes` (60): `old`.
-3. The number of source files in the header differs from the number now listed: `file count changed`. (A new or deleted file changes the count.)
-4. Any source file has an `mtime` newer than the map: `files changed`.
+2. The map was written by an older tokenkit (its header has `detail level`): `old format`.
+3. The map is older than `maxAgeMinutes` (60): `old`.
+4. The number of source files in the header differs from the number now listed: `file count changed`. (A new or deleted file changes the count.)
+5. Any source file has an `mtime` newer than the map: `files changed`.
 
-The check costs one `git ls-files` and one `stat` per source file. It reads no file contents. That is cheap for normal repositories, and it is run on every prompt (`prompt.mjs`) and every session start (`session.mjs`). A repository with tens of thousands of files would make this check noticeably slower. That is a known scaling limit.
+The check costs one `git ls-files` and one `stat` per source file. It reads no file contents, and it runs on every prompt (`prompt.mjs`) and every session start (`session.mjs`).
+
+Check 4 only works if both sides count the same files. That is why `buildMap` and `mapIsStale` share `sourceFiles`, and why oversized files are listed instead of skipped. Earlier versions skipped files over `maxFileKB` (and `map.exclude` matches) in the map but counted them here. In a repo with even one such file, for example an EF Core model snapshot or a WCF `Reference.cs`, the map then looked stale forever. Every prompt rebuilt it from scratch and could run past the prompt hook's 10-second timeout.
+
+**Incremental rebuilds.** `writeMap` (`repomap.mjs:261`) keeps a per-file cache in `.tokenkit/cache/repomap.json` (`[mtime, size, symbols]` per path). A rebuild stats every file but re-reads only files whose mtime or size changed. The cache is dropped when `maxFileKB` or `CACHE_VERSION` (bumped when extractors change) differs.
+
+Measured on a synthetic repo with 10,500 files (9,000 C#, 1,500 TSX) on Windows:
+
+| Step | Time |
+|---|---|
+| `mapIsStale` (list + 10,500 stats) | ~0.4 s |
+| full build, no cache | ~1.8 s with a warm disk cache; much longer when cold or antivirus-scanned |
+| rebuild with cache, nothing changed | ~0.6 s |
+| whole prompt hook (stale check, rebuild, hints) | ~1.5 s of its 10 s limit |
+
+`tk doctor` runs the session and prompt hooks against a deliberately stale map and reports their time against each hook's `timeoutSec`.
 
 ### 9.5 Resolving `file#symbol`
 
-`findSymbol(root, path, name)` (`repomap.mjs:209`) runs the same extractor on the file, finds the symbol, and returns its range: from its line to the line before the next symbol. For a method, the next symbol of any kind ends the range. For a top-level symbol, the range ends before the next top-level symbol, so the method bodies of a class are included. This is what lets `@src/cart.js#applyDiscount` become `lines 6-7`.
+`findSymbol(root, path, name)` (`repomap.mjs:280`) runs the same extractor on the file, finds the symbol, and returns its range: from its line to the line before the next symbol. For a method, the next symbol of any kind ends the range. For a top-level symbol, the range ends before the next top-level symbol, so the method bodies of a class are included. This is what lets `@src/cart.js#applyDiscount` become `lines 6-7`.
 
 ---
 
@@ -584,7 +653,7 @@ The output is a short block with the evidence:
 
 ```text
 [tokenkit] Likely locations for this request (repo-map match on: compress). Read these ranges first; search only if they turn out wrong:
-- src/lib/compress.mjs:55-172  compress
+- src/lib/compress.mjs:72-257  compress
 ```
 
 ### 10.4 Worked examples (run against this repository)
@@ -593,7 +662,7 @@ These come from `tk locate --why` on this repository.
 
 | Request | Cues | Result | Score arithmetic |
 |---|---|---|---|
-| `compress collapses repeated lines` | words: `compress`, `collapses`, `repeated` | `src/lib/compress.mjs:55-172 compress` | symbol `compress`: word match 3 + 2 (all parts matched) = 5; file basename `compress` +6; total 11 |
+| `compress collapses repeated lines` | words: `compress`, `collapses`, `repeated` | `src/lib/compress.mjs:72-257 compress` | symbol `compress`: word match 3 + 2 (all parts matched) = 5; file basename `compress` +6; total 11 |
 | `where is the repo map built and when is it refreshed` | words: `repo`, `map`, `built`, `refreshed`; joined `repomap` | `buildMap` and `mapIsStale` in `repomap.mjs` | file basename `repomap` matches joined `repomap` +6; symbol `mapIsStale`: word `map` 3; total 9 |
 | `classifyCommand decides the guard action` | ident `classifyCommand`; words `guard`, `action` | `rules.mjs:59-75 classifyCommand`, then `guard.mjs` | exact ident +10; file `guard.mjs` basename word `guard` +6 |
 | `the discount is applied twice` | words `discount`, `applied`, joined `discountapplied` | no hint | this repository has no discount code, so no candidate reaches the floor, and the output says `no confident match` |
@@ -703,12 +772,12 @@ The estimator is good enough to choose between compression rules, but it does no
 
 ### 14.1 What install does
 
-`install(target, {dryRun, force})` (`install.mjs:29`) performs four steps:
+`install(target, {dryRun, force})` (`install.mjs:32`) performs four steps:
 
-1. **Runtime.** Copy `src/` to `<target>/.tokenkit/`, excluding `logs/`, `repomap.md`, and an existing `config.json` (user settings are kept).
+1. **Runtime.** Copy `src/` to `<target>/.tokenkit/`, excluding generated files (`logs/`, `repomap.md`, `areas.md`, `cache/`) and an existing `config.json` (user settings are kept).
 2. **Templates.** For each file under `templates/`, decide what to do (table below).
-3. **`.gitignore`.** Append `.tokenkit/logs/`, `.tokenkit/repomap.md`, and `.tokenkit/handoff.md` if they are missing.
-4. **Repo map.** Build the first `repomap.md`.
+3. **`.gitignore`.** Append `.tokenkit/logs/`, `.tokenkit/repomap.md`, `.tokenkit/areas.md`, `.tokenkit/cache/` and `.tokenkit/handoff.md` if they are missing.
+4. **Repo map.** Build the first `repomap.md` and its symbol cache, so later hook rebuilds are incremental.
 
 ### 14.2 The manifest state machine
 
@@ -722,7 +791,7 @@ The installer must upgrade the files it wrote, but must never overwrite a file t
 | `m = hash(cur)` (the user has not edited the file since tokenkit wrote it) | write the new `tpl` | `updated` |
 | anything else (edited locally, or not created by tokenkit) | keep the file | `skipped` |
 
-The one exception is `.github/copilot-instructions.md`. It is **merged**, not replaced. `mergeBlock` (`install.mjs:22`) replaces only the text between `<!-- tokenkit:start -->` and `<!-- tokenkit:end -->`, or appends the block if the markers are missing. The user's own rules are never touched.
+The one exception is `.github/copilot-instructions.md`. It is **merged**, not replaced. `mergeBlock` (`install.mjs:25`) replaces only the text between `<!-- tokenkit:start -->` and `<!-- tokenkit:end -->`, or appends the block if the markers are missing. The user's own rules are never touched.
 
 Files that an older version installed but the current version no longer ships are **retired**: removed if untouched, kept with a note if edited. Otherwise dead files would keep costing tokens.
 
@@ -732,7 +801,7 @@ A timestamp says when a file changed, not whether the user changed it. A hash of
 
 ### 14.4 Uninstall
 
-`uninstall` (`install.mjs:120`) reverses the process with the same manifest. It removes a file only if its hash still matches the manifest, removes the tokenkit block from the instructions file (leaving the rest), removes the tokenkit `.gitignore` lines, and deletes `.tokenkit/`. Edited files are reported as `kept`.
+`uninstall` (`install.mjs:123`) reverses the process with the same manifest. It removes a file only if its hash still matches the manifest, removes the tokenkit block from the instructions file (leaving the rest), removes the tokenkit `.gitignore` lines, and deletes `.tokenkit/`. Edited files are reported as `kept`.
 
 ---
 
@@ -744,11 +813,13 @@ A timestamp says when a file changed, not whether the user changed it. A hash of
 |---|---|---|
 | guard blocks a lockfile | `read_file` on `package-lock.json` | the guard returns a `deny` decision |
 | guard routes `npm test` | `run_in_terminal` with `npm test` | the guard returns `updatedInput` that runs through `tk.mjs` (or a deny in deny mode) |
-| `userPromptSubmitted` runs | a prompt | exit 0 |
-| `postToolUse` runs | a terminal output | exit 0 |
-| `sessionStart` runs | no tool | exit 0 |
+| `userPromptSubmitted` runs | a prompt, with the repo map aged first | exit 0 within its `timeoutSec` |
+| `postToolUse` runs | a terminal output | exit 0 within its `timeoutSec` |
+| `sessionStart` runs | no tool, with the repo map aged first | exit 0 within its `timeoutSec` |
 
-It also checks the hook file, the instructions block, the repo map, `.gitignore`, whether `.tokenkit/` would be committed, and the always-on budget.
+Each hook runs under its own `timeoutSec` from `tokenkit.json`, as in VS Code, which cancels a slow hook. Before the prompt and session hooks run, doctor sets the map's mtime back a day, so they take the slow path, a map refresh, that VS Code will hit. A hook that runs out of time fails the check. One that uses more than half its limit gets a warning that suggests `map.exclude`. Each row shows the time used: `userPromptSubmitted hook runs (2.0s of its 10s limit, refreshing a stale map)`.
+
+It also checks the hook file, the instructions block, the repo map, `.gitignore`, whether `.tokenkit/` would be committed, and the always-on budget. Hooks fail open, so their errors are invisible in VS Code. Doctor therefore also reports any entries from the last 7 days in `.tokenkit/logs/errors.jsonl`.
 
 What doctor cannot check is what only VS Code knows: Workspace Trust, the organization's hook policy, and whether "Chat: Configure Hooks" lists the file. The output says so.
 
@@ -770,7 +841,7 @@ This traces one request in VS Code through every mechanism. The user types `run 
 
 6. **Compression.** The full output is written to `run-<time>.log` and `last.log`. `compress` runs with `exitCode = 1`. The lines are normalized. Library frames are collapsed. Progress and passing-test lines are dropped and counted. Repeated lines collapse. There are many more than 80 rows, so the head (6 rows) and tail (20 rows) are kept, and error windows are added in order while they fit under 80. The result is about 29 lines.
 
-7. **Output.** `runCommand` prints `[tk] FAILED exit 1 in 6.4s · 1540→29 lines, ~10k→~300 tokens · full log: .tokenkit/logs/last.log`, then the notes (for example, `1204 passing-test line(s) hidden`), then the compressed text. A line is appended to `runs.jsonl`.
+7. **Output.** `runCommand` prints `[tk] FAILED exit 1 in 6.4s · 1540→29 lines, ~10k→~300 tokens · full log: .tokenkit/logs/run-<timestamp>.log`, then the notes (for example, `1204 passing-test line(s) hidden`), then the compressed text. A line is appended to `runs.jsonl`.
 
 8. **Post-tool hook.** `post.mjs` runs on the tool result. In VS Code (`!camel`), it only logs the output size to `tools.jsonl`. It also checks the fallback condition: the output starts with `[tk]`, so the rewrite worked, and nothing is written to `state.json`. The result is not replaced, because VS Code does not support that.
 
@@ -798,9 +869,9 @@ The total effect on the agent's context is the difference between about 10k and 
 
 - Piped reads are classified as reads (section 7.6).
 - `ERROR` matches the word `error` in success summaries, so `0 errors` lines are kept (section 6.9).
-- `mapIsStale` stats every source file on every prompt, which scales linearly with repository size (section 9.4).
+- `mapIsStale` stats every source file on every prompt, which scales linearly with repository size: about 0.4 s for 10,500 files (section 9.4).
 - The location matcher has no IDF and no synonyms, so it misses requests that never name code (section 10.5).
-- Tests: `node --test "test/*.test.mjs"` (the `npm test` script) runs 46 tests in the current repository, and all pass.
+- Tests: `node --test "test/*.test.mjs"` (the `npm test` script) runs 57 tests in the current repository, and all pass.
 
 ---
 
@@ -810,34 +881,35 @@ The total effect on the agent's context is the difference between about 10k and 
 |---|---|---|---|
 | CLI dispatch | `src/tk.mjs` | `main` | one `switch` on the first argument |
 | Token estimate | `src/lib/tokens.mjs` | `estimateTokens` (4) | section 5 |
-| Output compressor | `src/lib/compress.mjs` | `compress` (55); regexes `NOISE` (9), `PASS` (25), `LIB_FRAME` (39), `ERROR` (49) | section 6 |
+| Output compressor | `src/lib/compress.mjs` | `compress` (72); regexes `NOISE` (9), `PASS` (25), `LIB_FRAME` (39), `ERROR` (49), `LOCATION` (60) | section 6 |
 | Run a command | `src/lib/run.mjs` | `runCommand` (33), `spawnIn` (24), `joinArgs` (10) | section 8.1 |
-| Verify | `src/lib/verify.mjs` | `detectChecks` (23), `verify` (52) | section 8.2 |
+| Verify | `src/lib/verify.mjs` | `findProjects` (41), `detectChecks` (101), `verify` (117) | section 8.2 |
 | Command rules | `src/lib/rules.mjs` | `classifyCommand` (59), `checkWrapped` (50), `wrapCommand` (41), `blockedPath` (76); `VERBOSE` (7), `BOUNDED` (24) | section 7 |
 | Hook I/O adapter | `src/lib/hookio.mjs` | `normalize` (19), `emitDeny` (37), `emitRewrite` (47), `emitResult` (54), `logEvent` (58), `commandMode` (80), `runHook` (88) | section 3.3 |
 | Guard hook | `src/hooks/guard.mjs` | `runHook` callback (43), `diffTooLarge` (25), `sizeKB` (17) | section 4.3 |
 | Post hook | `src/hooks/post.mjs` | `runHook` callback (23), `headTail` (17) | section 4.4 |
 | Prompt hook | `src/hooks/prompt.mjs` | `runHook` callback (23), `emitContext` (16) | section 4.2 |
 | Session hook | `src/hooks/session.mjs` | `runHook` callback (10) | section 4.1 |
-| Repo map | `src/lib/repomap.mjs` | `extractSymbols` (78), `listFiles` (111), `buildMap` (143), `mapIsStale` (184), `writeMap` (201), `findSymbol` (209); `LANGS` (18) | section 9 |
-| Location hints | `src/lib/locate.mjs` | `extractCues` (77), `locate` (96), `formatHints` (172), `stem` (42); `STOP` (10), `GENERIC_PATH` (26), `SUFFIXES` (39) | section 10 |
+| Repo map | `src/lib/repomap.mjs` | `extractSymbols` (81), `listFiles` (117), `sourceFiles` (168), `buildMap` (178), `buildOverview` (215), `mapIsStale` (242), `writeMap` (261), `findSymbol` (280); `LANGS` (21) | section 9 |
+| Location hints | `src/lib/locate.mjs` | `extractCues` (84), `locate` (103), `formatHints` (187), `stem` (44); `STOP` (10), `GENERIC_PATH` (26), `SUFFIXES` (39) | section 10 |
 | TaskSpec | `src/lib/spec.mjs` | `parseSpec` (46), `expandSpec` (70); `VERBS` (7), `FLAG_DEFS` (20) | section 11 |
 | Budget audit | `src/lib/budget.mjs` | `audit` (62), `lint` (43), `parseFrontmatter` (12), `formatAudit` (144) | section 12 |
 | Report | `src/lib/report.mjs` | `report` (13) | section 13.1 |
 | VS Code usage | `src/lib/usage.mjs` | `findWorkspaceStorage` (28), `summarizeSession` (44), `debugLogStats` (123), `usageReport` (151), `formatCompare` (173) | section 13.2 |
-| Install and uninstall | `src/lib/install.mjs` | `install` (29), `mergeBlock` (22), `uninstall` (120); `START`/`END` (7) | section 14 |
+| Install and uninstall | `src/lib/install.mjs` | `install` (32), `mergeBlock` (25), `uninstall` (123); `START`/`END` (8) | section 14 |
 | Health check | `src/lib/doctor.mjs` | `doctor` (14) | section 15 |
-| Configuration | `src/lib/config.mjs` | `DEFAULTS`, `loadConfig` (66), `merge` (58), `KIT_DIR` | every tunable is here |
+| Configuration | `src/lib/config.mjs` | `DEFAULTS`, `loadConfig` (71), `merge` (63), `KIT_DIR` | every tunable is here |
 | Hook registration | `templates/.github/hooks/tokenkit.json` | four events | the one-liner fail-open pattern |
 | Agent guidance | `templates/.github/copilot-instructions.md` | the marked block | always-on, about 324 tokens |
 | Skills | `templates/.github/skills/*/SKILL.md` | `lean-explore`, `lean-verify` | loaded when relevant |
-| Tests | `test/*.test.mjs` | `node --test "test/*.test.mjs"` | 46 tests, all passing at time of writing |
+| Tests | `test/*.test.mjs` | `node --test "test/*.test.mjs"` | 57 tests, all passing at time of writing |
 
 ### Configuration reference (from `config.mjs`)
 
 | Key | Default | Used by | Effect |
 |---|---|---|---|
-| `run.maxLines` | 80 | `compress` | line cap on failure output |
+| `run.maxLines` | 80 | `compress` | cap on head, tail and context lines on failure |
+| `run.maxErrorLines` | 150 | `compress` | separate budget for error lines and their `file:line` locations |
 | `run.headLines` / `tailLines` | 6 / 20 | `compress` | rows kept at start and end on failure |
 | `run.successTail` | 8 | `compress` | tail kept on success (cap is twice this) |
 | `run.context` | 2 | `compress` | lines kept around each error |
@@ -854,10 +926,11 @@ The total effect on the agent's context is the difference between about 10k and 
 | `prompt.hints` | `on` | prompt hook | `on` or `off` |
 | `prompt.maxHints` | 5 | `locate` | hints per prompt |
 | `prompt.minScore` | 5 | `locate` | floor for a hint (10 = exact name, 8 = two words, 5 = one whole-name word) |
-| `map.maxTokens` | 4000 | `buildMap` | budget for the repo map |
+| `map.maxTokens` | 4000 | `buildMap` | above this the map is grep-only and `areas.md` is written within this budget |
 | `map.maxAgeMinutes` | 60 | `mapIsStale` | map age limit |
-| `map.maxFileKB` | 256 | `buildMap` | larger files are not indexed |
-| `map.exclude` | `[]` | `buildMap` | regular expressions for files to leave out |
+| `map.maxFileKB` | 256 | `buildMap` | larger files are listed by path only |
+| `map.exclude` | `[]` | `sourceFiles` | regular expressions for files to leave out |
+| `verify.checks` | `[]` | `detectChecks` | explicit `{ label, cwd, cmd }` checks that replace detection |
 | `budget.alwaysOnTokens` | 1200 | `audit` | always-on budget |
 | `budget.skillDescriptionChars` | 300 | `audit` | skill description limit |
 
@@ -876,7 +949,7 @@ The total effect on the agent's context is the difference between about 10k and 
 - **Rewrite**: changing a tool call's arguments before it runs. The approval prompt then shows the rewritten call.
 - **Wrapper**: the `tk run … -- <cmd>` form that a rewritten command takes.
 - **Repo map**: a one-line-per-file symbol index in `.tokenkit/repomap.md`.
-- **Degradation level**: the step by which the repo map loses detail to fit its budget.
+- **Folder overview**: `.tokenkit/areas.md`, written when the repo map is over its token budget, so the agent can see the repo's areas without reading the map.
 - **Cue**: a piece of a prompt used for matching (an identifier, a path, a word, or a joined word pair).
 - **Stem**: the root of a word after a light suffix removal, used so that `applied` matches `apply`.
 - **Hint**: a "start reading here" line added to a prompt.

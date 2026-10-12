@@ -7,6 +7,7 @@ description: Run builds, tests, linters or type-checks with the fewest calls and
 Each command is one more model call that re-sends the whole conversation. Fewer calls save more than shorter output.
 
 - **Finish with one call:** `node .tokenkit/tk.mjs verify` runs typecheck, lint and tests together and prints only what failed. Add `--build` when the build matters. Don't run typecheck, lint and tests as separate calls.
+- **Several projects in one repo** (frontend + backend, or a folder of repos): plain `verify` checks every project it finds. Add `--in <dir>` (e.g. `--in src/Frontend`) to check only the project you changed. Don't build a large solution to verify a frontend edit.
 - **While fixing one failing test**, re-run just that test, once per fix attempt: `node .tokenkit/tk.mjs run -- npx vitest run path/x.test.ts` (`pytest path::name -q`, `go test ./pkg -run Name`, `dotnet test --filter Name`).
 - **At most 3 fix attempts** on the same failure. Then stop and report the failing assertion (one line), the suspected cause, and what you tried.
 - **Need more detail?** Grep the log file named in the `[tk]` header. Never read it whole.

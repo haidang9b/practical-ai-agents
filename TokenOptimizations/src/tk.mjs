@@ -12,12 +12,15 @@ import { expandSpec, LEGEND } from './lib/spec.mjs';
 import { formatHints, locate } from './lib/locate.mjs';
 import { doctor, formatDoctor } from './lib/doctor.mjs';
 import { formatCompare, formatUsage, usageReport } from './lib/usage.mjs';
+import { fmtTokens } from './lib/tokens.mjs';
 
 const HELP = `tokenkit (tk) — keep Copilot's context small
 
-  tk run [--raw] -- <cmd...>    run a command, print compressed output (full log in .tokenkit/logs/last.log)
-  tk verify [--build] [--only typecheck,test]
-                                ALL checks (typecheck, lint, tests) in ONE call: fewer agent steps
+  tk run [--raw] -- <cmd...>    run a command, print compressed output (full log: the run-*.log named in the header)
+  tk verify [--build] [--only typecheck,test] [--in <dir>]
+                                ALL checks (typecheck, lint, tests) in ONE call: fewer agent steps.
+                                Finds every project (src/Frontend, src/Backend/*.sln, nested repos);
+                                --in limits the run to the project(s) in or around <dir>
   tk filter [--exit N]          compress stdin:  <cmd> 2>&1 | node .tokenkit/tk.mjs filter
   tk map [--print]              (re)build .tokenkit/repomap.md, the grep-able symbol index
   tk spec "<taskspec>"          expand TaskSpec shorthand into a full prompt  (--legend: print legend)
@@ -50,8 +53,9 @@ async function main() {
     case 'verify': {
       const build = flag('--build');
       const only = opt('--only');
+      const inDir = opt('--in');
       process.chdir(repoRoot());
-      return verify(repoRoot(), { build, only: only ? only.split(',') : undefined });
+      return verify(repoRoot(), { build, only: only ? only.split(',') : undefined, inDir });
     }
     case 'filter': {
       const exit = opt('--exit');
@@ -65,7 +69,7 @@ async function main() {
     case 'map': {
       const r = writeMap(repoRoot(), join(KIT_DIR, 'repomap.md'));
       if (flag('--print')) process.stdout.write(r.text);
-      else console.log(`.tokenkit/repomap.md: ${r.files} files, ~${r.tokens} tokens (detail level ${r.level}/4)`);
+      else console.log(`.tokenkit/repomap.md: ${r.files} files, ~${fmtTokens(r.tokens)} tokens${r.overview ? ' (grep-only; folder overview in .tokenkit/areas.md)' : ''}`);
       return 0;
     }
     case 'spec': {

@@ -98,3 +98,72 @@ test('distinct error lines are never collapsed as "similar"', () => {
   const r = compress(raw, { exitCode: 1 });
   for (let i = 0; i < 10; i++) assert.match(r.text, new RegExp(`'v${i}'`));
 });
+
+// Varied log lines, so nothing collapses and the output really is long.
+const range = (n, f) => Array.from({ length: n }, (_, i) => f(i));
+const appLogs = (n, o = 0) => range(n, (i) => [`info: Orders[0] Processing order ${i + o}`, `dbug: EF[20101] Executed DbCommand (${i}ms)`,
+  `info: Billing[0] Invoice INV-${i + o} queued`, `info: Lifetime[0] Heartbeat ${i + o}`][i % 4]);
+
+test('regression: a failing C# test keeps its file:line and Actual value in long output', () => {
+  const fail = (name, line, act) => [`  Failed Contoso.Tests.OrderTests.${name} [12 ms]`, '  Error Message:', '   Assert.Equal() Failure: Values differ',
+    '   Expected: 90', `   Actual:   ${act}`, '  Stack Trace:', `     at Contoso.Tests.OrderTests.${name}() in D:\\src\\Tests\\OrderTests.cs:line ${line}`,
+    '     at System.RuntimeMethodHandle.InvokeMethod(Object target, Void** arguments)'];
+  const raw = [...appLogs(300), ...fail('Discount', 42, 81), ...appLogs(300, 300), ...fail('Refund', 77, 4), ...appLogs(300, 600),
+    'Failed!  - Failed:     2, Passed:   800, Skipped:     0, Total:   802'].join('\n');
+  const r = compress(raw, { exitCode: 1 });
+  for (const s of ['OrderTests.cs:line 42', 'Actual:   81', 'OrderTests.cs:line 77', 'Actual:   4', 'Failed:     2']) assert.ok(r.text.includes(s), s);
+  assert.doesNotMatch(r.text, /RuntimeMethodHandle/);
+});
+
+test('regression: each failing jest test keeps its file:line, even many rows below the error', () => {
+  const raw = ['> jest', ...range(12, (k) => [...range(40, (i) => `PASS src/m${k}_${i}.test.tsx`), `FAIL src/cart${k}.test.tsx`, `  ● cart › total ${k}`, '',
+    `    Expected: ${k}`, `    Received: ${k + 1}`, '', `    > ${11 + k} |   expect(c.total()).toBe(${k});`, '         |   ^', '',
+    `      at Object.<anonymous> (src/cart${k}.test.tsx:${11 + k}:21)`, '      at Promise.then.completed (node_modules/jest-circus/build/utils.js:298:28)', '']).flat(),
+  'Tests:       12 failed, 480 passed, 492 total'].join('\n');
+  const r = compress(raw, { exitCode: 1 });
+  for (let k = 0; k < 12; k++) {
+    assert.ok(r.text.includes(`cart${k}.test.tsx:${11 + k}:21`), `location of test ${k}`);
+    assert.ok(r.text.includes(`Received: ${k + 1}`), `received of test ${k}`);
+  }
+});
+
+test('regression: an error overwritten by a carriage-return progress update is kept', () => {
+  const raw = [...range(300, (i) => `step ${i} done`), 'error: EADDRINUSE: address already in use :::5173\r  building... 40%', ...range(300, (i) => `cleanup ${i}`)].join('\n');
+  assert.match(compress(raw, { exitCode: 1 }).text, /EADDRINUSE/);
+});
+
+test('every distinct error is kept up to maxErrorLines, past the line cap', () => {
+  const raw = range(150, (i) => `src/f${i % 30}/Item${i}.tsx(${i + 3},9): error TS2304: Cannot find name 'OrderDto${i}'.`).join('\n') + '\n\nFound 150 errors in 150 files.';
+  const r = compress(raw, { exitCode: 1 });
+  for (let i = 0; i < 150; i++) assert.ok(r.text.includes(`'OrderDto${i}'`), `error ${i}`);
+  const tight = compress(raw, { exitCode: 1, maxErrorLines: 40 });
+  assert.match(tight.notes.join('; '), /\d+ more error line\(s\) not shown \(TS2304 ×\d+\) in \d+ file\(s\); grep the log/);
+});
+
+test('MSBuild\'s repeated error summary is shown once, warnings are summarized by code', () => {
+  const errs = range(30, (i) => `D:\\src\\Billing\\Invoice${i}.cs(${10 + i},17): error CS0103: The name 'item${i}' does not exist in the current context [D:\\src\\Billing\\Billing.csproj]`);
+  const warns = range(60, (i) => `D:\\src\\Billing\\Dto${i}.cs(5,23): warning CS8618: Non-nullable property 'Name' is uninitialized. [D:\\src\\Billing\\Billing.csproj]`);
+  const r = compress([...warns, ...errs, 'Build FAILED.', ...warns, ...errs, '    60 Warning(s)', '    30 Error(s)'].join('\n'), { exitCode: 1 });
+  for (let i = 0; i < 30; i++) assert.equal(r.text.split(`'item${i}'`).length - 1, 1, `item${i} shown exactly once`);
+  assert.match(r.notes.join('; '), /30 repeated error line\(s\) shown once/);
+  assert.match(r.notes.join('; '), /60 warning line\(s\) in full log \(CS8618 ×60\)/);
+  assert.match(r.text, /30 Error\(s\)/);
+});
+
+test('one error repeated in hundreds of files is folded; a different error among them survives', () => {
+  const lines = range(2000, (i) => `src/Billing/F${i % 300}.cs(${i + 1},5): error CS0246: The type or namespace name 'OrderDto' could not be found [Billing.csproj]`);
+  lines.splice(1500, 0, "src/Api/Startup.cs(12,9): error CS1061: 'IServiceCollection' does not contain a definition for 'AddBilling'");
+  const r = compress(lines.join('\n'), { exitCode: 1 });
+  assert.match(r.text, /AddBilling/);
+  assert.match(r.notes.join('; '), /same error at \d+ more location\(s\) in \d+ file\(s\): "error CS0246: The type or namespace name 'OrderDto' could not be found"/);
+  assert.ok(r.stats.keptTokens < r.stats.rawTokens / 10, `${r.stats.keptTokens} of ${r.stats.rawTokens}`);
+});
+
+test('a long Python traceback keeps the exception line and the frames nearest to it', () => {
+  const raw = [...appLogs(200), 'Traceback (most recent call last):',
+    ...range(12, (i) => [`  File "/app/svc/step${i}.py", line ${i + 1}, in step${i}`, `    step${i + 1}()`]).flat(),
+    '  File "/app/svc/pricing.py", line 88, in recalc', '    raise ValueError("negative total")', 'ValueError: negative total', ...appLogs(200, 200)].join('\n');
+  const r = compress(raw, { exitCode: 1 });
+  assert.match(r.text, /ValueError: negative total/);
+  assert.match(r.text, /pricing\.py", line 88/);
+});

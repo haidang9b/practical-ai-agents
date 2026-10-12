@@ -291,7 +291,7 @@ To retry rewriting after a VS Code update, delete `.tokenkit/logs/state.json`.
 
 ### 4.6 The session hook (`hooks/session.mjs`, sessionStart)
 
-Rebuilds `.tokenkit/repomap.md` if it is stale: missing, older than 60 minutes (`map.maxAgeMinutes`), listing a different number of source files, or older than any source file. The prompt hook runs the same check before matching, so files the agent created a minute ago are already in the map. It returns nothing, so the start of every prompt stays identical across sessions, which keeps the prompt cache warm.
+Rebuilds `.tokenkit/repomap.md` if it is stale: missing, older than 60 minutes (`map.maxAgeMinutes`), listing a different number of source files, or older than any source file. The prompt hook runs the same check before matching, so files the agent created a minute ago are already in the map. Rebuilds are incremental: a per-file cache (`.tokenkit/cache/repomap.json`) means only changed files are re-read, which keeps both hooks well inside their timeouts on repos with 10,000+ files. It returns nothing, so the start of every prompt stays identical across sessions, which keeps the prompt cache warm.
 
 ### 4.7 The prompt hook: plain-language requests
 
@@ -362,11 +362,11 @@ node .tokenkit/tk.mjs run --raw -- npm test                     # full output, s
 What happens, in order:
 
 1. **Run.** The command is started with `CI=1`, `NO_COLOR=1` and `FORCE_COLOR=0`, which most tools respect by printing fewer progress bars and no colors. Shell choice: `--shell bash` → `bash -c`, `--shell powershell` → `powershell.exe -NoProfile -Command` (`pwsh` on macOS/Linux), otherwise the platform default. stdout and stderr are captured together, in order.
-2. **Save.** The full output goes to `.tokenkit/logs/last.log` and to `run-<timestamp>.log`; the last 10 are kept. A stats line goes to `runs.jsonl`.
+2. **Save.** The full output goes to `run-<timestamp>.log` (the last 10 are kept) and to `last.log`. The header names the run's own file, because `last.log` is overwritten by the next run and the agent may grep this output several commands later. A stats line goes to `runs.jsonl`.
 3. **Compress** (5.2) and print, starting with a status header:
 
 ```text
-[tk] FAILED exit 1 in 1.9s · 1540→29 lines, ~10k→307 tokens · full log: .tokenkit/logs/last.log
+[tk] FAILED exit 1 in 1.9s · 1540→29 lines, ~10k→307 tokens · full log: .tokenkit/logs/run-2026-10-12T13-23-41-096Z.log
 [tk] 250 passing-test line(s) hidden; 1255 progress/noise line(s) hidden; 6 library stack-frame line(s) collapsed
 ```
 
@@ -376,14 +376,20 @@ What happens, in order:
 
 The compressor (`src/lib/compress.mjs`) is a fixed pipeline of text rules, with no AI involved. Same input, same output.
 
-1. **Normalize.** Remove ANSI color codes. For lines redrawn with carriage returns (progress bars), keep only the final state. Trim trailing spaces.
+1. **Normalize.** Remove ANSI color codes. For lines redrawn with carriage returns (progress bars), keep the final state, plus any error the redraw overwrote. Trim trailing spaces.
 2. **Drop noise:** progress bars and percentages, spinners, `npm warn/notice`, pip `Collecting/Downloading`, git `Counting objects`, NuGet restore chatter, Maven/Gradle downloads, cargo `Compiling x v1.2`, `go: downloading`, Docker layer lines, TAP bookkeeping (`# Subtest:`, `duration_ms:`, `---`/`...`). Each is counted.
 3. **Drop passing tests:** `✓`, `PASS`, `PASSED`, `ok N -`, `--- PASS:`, `test x ... ok`, `[ OK ]`, `Passed`, pytest dot rows. A line is never dropped if it also contains "fail" or "error".
 4. **Collapse library stack frames.** Runs of frames from `node_modules`, `node:internal`, Java/.NET framework packages, Python `site-packages` (with their code line), Rust std and Go runtime become one line: `… 6 library frame line(s)`. Frames from your own code stay.
-5. **De-duplicate.** Identical consecutive lines become one line with `(×N)`.
+5. **De-duplicate.** Identical consecutive lines become one line with `(×N)`. An error line with a `file:line` location that already appeared (MSBuild repeats every error in its summary) is shown once.
 6. **Collapse same-shape runs.** Five or more consecutive lines that differ only in numbers or quoted text (`copying file 17 of 300`) keep the first two, a `… +N similar line(s)` marker and the last one. Error lines are never collapsed, because each may name a different location.
-7. **Select what fits.** If the result is still over the cap, keep the first 6 lines, the last 20, and every error line with 2 lines of context. Error lines match error, fail, exception, panic, traceback, assert, expected, received, `✗`, `●`, `> 12 |` code pointers, and so on. The cap is 80 lines on failure; on success it is 16, keeping the last 8 lines plus any error-like lines. Gaps are marked `… [N line(s) omitted]`. If error windows overflow the cap, the earliest errors are kept, because later ones are often cascades.
-8. **Notes.** One line says what was hidden, including a count of warning lines left in the full log.
+7. **Select what fits.** If the result is still over the cap, two budgets apply:
+   - **Errors first, with their own budget** (`run.maxErrorLines`, 150). Every error line is kept, plus up to 3 nearby source locations: the stack frame `in OrderTests.cs:line 42` after `Actual: 81`, `(src/cart.test.tsx:11:21)`, or the `File "…", line N` lines before a Python exception. Error lines match error, fail, failing, exception, exception class names (`ValueError:`), panic, traceback, assert, expected/received, `Actual:`/`But was:`, aborted, crashed, timed out, out of memory, `EADDRINUSE`-style codes, `✗`, `●`, `> 12 |` code pointers, and so on. The same error repeated at many locations (one renamed type → `CS0246` in 400 files) is shown 3 times, then counted.
+   - **Head, tail and context share the line cap** (`run.maxLines`, 80): the first 6 lines, the last 20, and 2 lines around each error, earliest errors first.
+   
+   On success, the cap is 16 lines: the last 8 plus a few error-like lines. Gaps are marked `… [N line(s) omitted]`.
+8. **Notes.** One line says what was hidden: passing tests, noise and frames, warnings with their codes (`CS8618 ×60`), each folded error with its count and file count, and any errors past the budget (count, codes, files) with a pointer to the log.
+
+Nothing is cut without a trace. Every removal is counted in the notes, and the full output is in the log named in the header.
 
 **Real example** (from the demo; 1,540 lines in, 29 out). The raw output starts like this and repeats it 250 times:
 
@@ -402,7 +408,7 @@ ok 1 - cart adds item 0
 What the agent receives:
 
 ```text
-[tk] FAILED exit 1 in 1.9s · 1540→29 lines, ~10k→307 tokens · full log: .tokenkit/logs/last.log
+[tk] FAILED exit 1 in 1.9s · 1540→29 lines, ~10k→307 tokens · full log: .tokenkit/logs/run-2026-10-12T13-23-41-096Z.log
 [tk] 250 passing-test line(s) hidden; 1255 progress/noise line(s) hidden; 6 library stack-frame line(s) collapsed
 > test
 > node --test
@@ -448,7 +454,7 @@ Same pipeline as `tk run`, for output you already have.
 `.tokenkit/repomap.md` is a one-line-per-file symbol index, built by `tk map` and refreshed by the session hook:
 
 ```text
-# Repo map · 214 source files · detail level 0/4 · regenerate: node .tokenkit/tk.mjs map
+# Repo map · 214 source files · ~3.1k tokens · regenerate: node .tokenkit/tk.mjs map
 # path | Symbol:line .method:line — grep this file for a name, then read only that line range.
 src/auth/login.ts | validateUser:12 LoginForm:40 .submit:52 .reset:61 hashPw:88
 src/cart.js | Cart:1 applyDiscount:6
@@ -456,11 +462,11 @@ src/cart.js | Cart:1 applyDiscount:6
 
 How it is built (`src/lib/repomap.mjs`):
 
-1. **List files** with `git ls-files` (respects `.gitignore`), or by walking the folder if it's not a git repo. Dependency and build folders, generated files (`*.min.*`, `*.d.ts`, `*.g.cs`, `*_pb2.py`, …), files over 256 KB and `map.exclude` patterns are skipped.
-2. **Extract symbols** with per-language regular expressions: TypeScript/JavaScript (also `.vue`, `.svelte`), Python, Go, C#, Java/Kotlin/Scala, Rust, PHP, Ruby. Top-level functions, classes, types and exports are taken, plus up to 15 public methods per file, shown as `.method`.
-3. **Fit the budget** (`map.maxTokens`, 4,000 by default) by dropping detail until it fits: level 0 everything, 1 no methods, 2 no symbols in test files, 3 paths only, 4 directory counts only.
+1. **List files** with `git ls-files` (respects `.gitignore`), or by walking the folder if it's not a git repo. Nested repositories (an untracked repo inside the repo, submodules, or repos inside a plain folder) are listed through their own git, so one map covers a folder holding a frontend repo and a backend repo. Dependency and build folders, generated files (`*.min.*`, `*.d.ts`, `*.g.cs`, `*_pb2.py`, …) and `map.exclude` patterns are skipped. Files over 256 KB (`map.maxFileKB`) are listed by path only.
+2. **Extract symbols** with per-language regular expressions: TypeScript/JavaScript (also `.vue`, `.svelte`), Python, Go, C#, Java/Kotlin/Scala, Rust, PHP, Ruby. Top-level functions, classes, types and exports are taken, plus up to 15 public methods per file, shown as `.method`. Results are cached per file, so a rebuild re-reads only files that changed.
+3. **Large repos keep full detail.** The map always lists every file with its symbols. Above `map.maxTokens` (4,000 by default), its header says it is too big to read whole, and tk also writes `.tokenkit/areas.md`, a folder overview within the budget (folders, file counts, subfolders). For example, 10,500 files give a map of about 1.3M tokens (grep it, never read it) and a 22-line overview.
 
-The agent greps the map for a name and gets the file and line in one call, then reads only that range. Without it, finding code typically takes several search, list and read calls, each a full round-trip.
+The agent greps the map for a name and gets the file and line in one call, then reads only that range. Without it, finding code typically takes several search, list and read calls, each a full round-trip. The guard denies whole-file reads over 48 KB, so a large map can only be grepped.
 
 ### 5.5 TaskSpec
 
@@ -620,7 +626,7 @@ Prefer `@path:range` over VS Code's `#file:` for big files. `#file` pastes the w
 
 | Command | When |
 |---|---|
-| `node .tokenkit/tk.mjs verify [--build]` | All checks in one call (what the agent should use too) |
+| `node .tokenkit/tk.mjs verify [--build] [--in <dir>]` | All checks in one call (what the agent should use too). Runs every project it finds (`src/Frontend`, `src/Backend/*.sln`, nested repos); `--in` runs only the project in or around `<dir>` |
 | `node .tokenkit/tk.mjs run -- <cmd>` | Run anything noisy yourself, or see what the agent sees |
 | `node .tokenkit/tk.mjs map` | After big refactors (otherwise it refreshes hourly) |
 | `node .tokenkit/tk.mjs spec "<taskspec>"` | Check a spec, or see the lines a `#Symbol` resolves to |
@@ -658,7 +664,8 @@ Create `.tokenkit/config.json` with only the keys you want to change. Everything
 | `guard.maxReadKB` | `48` | Whole-file reads above this size need a line range |
 | `guard.blockPaths` | see 4.2 | Regular expressions for paths never to read |
 | `guard.allowPaths` | `[]` | Regular expressions that override `blockPaths`, e.g. `"^docs/generated/"` |
-| `run.maxLines` | `80` | Maximum lines returned on failure |
+| `run.maxLines` | `80` | Maximum head, tail and context lines returned on failure |
+| `run.maxErrorLines` | `150` | Separate budget for error lines and their `file:line` locations; past it, a note gives the count, error codes and files |
 | `run.headLines` / `run.tailLines` | `6` / `20` | Lines always kept from the start / end on failure |
 | `run.successTail` | `8` | Lines kept on success (the cap is twice this) |
 | `run.context` | `2` | Lines kept around each error line |
@@ -671,10 +678,11 @@ Create `.tokenkit/config.json` with only the keys you want to change. Everything
 | `prompt.hints` | `"on"` | `off` stops plain-language location hints (TaskSpec expansion stops too) |
 | `prompt.maxHints` | `5` | Most locations in one note |
 | `prompt.minScore` | `5` | Confidence floor; raise to 8 for fewer, surer hints (scoring table in [4.7](#47-the-prompt-hook-plain-language-requests)) |
-| `map.maxTokens` | `4000` | Repo map budget |
+| `map.maxTokens` | `4000` | Above this the map is grep-only and `.tokenkit/areas.md` (a folder overview within this budget) is written |
 | `map.maxAgeMinutes` | `60` | The session hook rebuilds an older map |
-| `map.maxFileKB` | `256` | Larger files are not indexed |
-| `map.exclude` | `[]` | Regular expressions for paths to leave out of the map |
+| `map.maxFileKB` | `256` | Larger files are listed by path only, without symbols |
+| `map.exclude` | `[]` | Regular expressions for paths to leave out of the map, e.g. `"^src/Legacy/"`, `"/Migrations/"` |
+| `verify.checks` | `[]` | Explicit checks instead of auto-detection: `[{ "label": "api:test", "cwd": "src/Backend", "cmd": "dotnet test Contoso.sln -v q" }]` |
 | `budget.alwaysOnTokens` | `1200` | `tk budget --ci` fails above this |
 | `budget.skillDescriptionChars` | `300` | Longer skill descriptions are flagged |
 
@@ -705,10 +713,12 @@ Adapt the end of the pattern to your own commands, such as `dotnet test`. Keep i
 | `Cannot find module …/tk.mjs` | The agent's terminal was in a subfolder, or `.tokenkit/` was never committed | Rewrites use an absolute path; for deny-mode commands, `cd` to the repo root. Commit `.tokenkit/`. |
 | A file you need is blocked | It matches `guard.blockPaths` | Add a pattern to `guard.allowPaths`, or read a range with grep |
 | You now get approval prompts for tests that were auto-approved | Rules are checked against the rewritten command | Add the narrow rule from [section 8](#optional-skip-approval-for-wrapped-test-and-build-runs) |
-| Too much was cut from an output | Error pattern not recognized | Add a `run.errors` pattern, raise `run.maxLines`, or grep `last.log` |
+| Too much was cut from an output | Error pattern not recognized | Add a `run.errors` pattern, raise `run.maxLines` or `run.maxErrorLines`, or grep the `run-*.log` named in the `[tk]` header |
 | A plain-language request got no `Likely locations` note | It names nothing found in file, class or function names, or the map is stale | Check with `tk locate --why "…"`; mention the function or file; run `tk map` |
 | Hints point at the wrong code | A word matched a different module | Name the identifier in backticks, or raise `prompt.minScore` to 8 |
 | Repo map is missing a language or symbol | Regex-based extraction | `map.exclude` for noise; add patterns in `src/lib/repomap.mjs` ([section 11](#11-extending-tokenkit-and-code-map)) |
+| VS Code reports a tokenkit hook as failed or timed out; `tk doctor` warns a hook is slow | Large repo: refreshing the map takes too long, usually the first build after an upgrade (no cache yet), or bulky folders | Run `node .tokenkit/tk.mjs map` once to build the cache; add `map.exclude` patterns for generated or vendored code; re-run `tk doctor` |
+| `tk verify` finds no checks, or checks the wrong projects | Manifests deeper than 4 folders, or an unusual layout | `tk verify --in <dir>`; or list the checks under `verify.checks` in `.tokenkit/config.json` |
 | Anything unexplained | | Look in `.tokenkit/logs/errors.jsonl` and `guard.jsonl` |
 
 ---
@@ -716,7 +726,8 @@ Adapt the end of the pattern to your own commands, such as `dotnet test`. Keep i
 ## 10. Limits and evidence
 
 **Verified:**
-- **Automated tests:** 39 tests (`npm test`) cover location hints for plain-language requests on a sample app, the compressor (Jest, TAP, pytest and TypeScript samples), repo map extraction for 5 languages, guard decisions in both payload dialects, the forged-wrapper check, the self-healing fallback, the post hook, TaskSpec, budget findings and install/upgrade.
+- **Automated tests:** 57 tests (`npm test`) cover location hints for plain-language requests on a sample app, the compressor (Jest, TAP, pytest and TypeScript samples; each failing test keeps its `file:line` in long .NET and jest output; error budgets, MSBuild repeats, folded duplicates), repo map extraction for 5 languages, large-map behavior, the incremental map cache, nested repositories, multi-project `tk verify`, guard decisions in both payload dialects, the forged-wrapper check, the self-healing fallback, the post hook, TaskSpec, budget findings and install/upgrade.
+- **Large repo, measured:** a synthetic repo of 10,500 files (9,000 C#, 1,500 TSX) on Windows. Install took 2 s. The prompt hook took 1.5 s of its 10 s limit, including a stale-map refresh. Location hints still pointed at the right C# classes.
 - **Measured:** 1,540 lines (~10k tokens) became 29 lines (~300 tokens) on a 251-test Node project. The run was replayed with the exact hook commands, spawned three ways (PowerShell argument, cmd, `shell: powershell.exe`), on Windows.
 - **Checked in VS Code's own code** (VS Code 1.141.0, Copilot Chat 0.69.0):
   - `updatedInput` is applied without a permission decision, after validation against the tool's schema;
@@ -748,7 +759,8 @@ Adapt the end of the pattern to your own commands, such as `dotnet test`. Keep i
 | `src/hooks/session.mjs` | sessionStart repo-map refresh |
 | `src/hooks/prompt.mjs` | userPromptSubmitted: location hints or TaskSpec expansion |
 | `src/lib/locate.mjs` | Cue extraction, stemmer, scoring, hint text (`tk locate`) |
-| `src/lib/repomap.mjs` | File listing, symbol extractors, budget levels, `findSymbol` |
+| `src/lib/repomap.mjs` | File listing (nested repos too), symbol extractors, symbol cache, folder overview, `findSymbol` |
+| `src/lib/verify.mjs` | `tk verify`: project discovery, per-project checks, `--in` |
 | `src/lib/spec.mjs` | TaskSpec verbs, flags, legend, parser, expander |
 | `src/lib/budget.mjs` | Always-on audit and lint rules |
 | `src/lib/report.mjs` | Log aggregation for `tk report` |

@@ -13,5 +13,5 @@ runHook(async (payload) => {
   const why = mapIsStale(root, out);
   if (!why) return;
   const r = writeMap(root, out);
-  logEvent('session.jsonl', { event: 'map', why, files: r.files, tokens: r.tokens, level: r.level, cwd: payload.cwd });
+  logEvent('session.jsonl', { event: 'map', why, files: r.files, read: r.read, tokens: r.tokens, cwd: payload.cwd });
 });

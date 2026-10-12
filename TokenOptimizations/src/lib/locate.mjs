@@ -39,8 +39,15 @@ const splitWords = (s) => s
 const SUFFIXES = ['izations', 'ization', 'ations', 'ation', 'ators', 'ator', 'izing', 'izes', 'ized', 'ize',
   'ments', 'ment', 'ings', 'ing', 'ions', 'ion', 'ating', 'ates', 'ated', 'ate', 'ers', 'er', 'ors', 'or',
   'ies', 'ied', 'es', 'ed', 's'];
+// Memoized: a large repo's map holds 100k+ symbol names, most sharing parts.
+const STEMS = new Map();
 export function stem(word) {
-  let w = word.toLowerCase();
+  const key = word.toLowerCase();
+  let s = STEMS.get(key);
+  if (s === undefined) STEMS.set(key, (s = stemOnce(key)));
+  return s;
+}
+function stemOnce(w) {
   for (const suf of SUFFIXES) {
     if (!w.endsWith(suf) || w.length - suf.length < 3) continue;
     if (suf === 's' && /(ss|us|is)$/.test(w)) break;
@@ -105,15 +112,23 @@ export function locate(prompt, root, opts = {}) {
   const identLower = new Set([...identSet].map((i) => i.toLowerCase()));
   const candidates = [];
 
-  const allWords = [...cues.words, ...cues.joined];
+  const allStems = new Set([...cues.words, ...cues.joined].map(stem));
+  const joinedStems = new Set(cues.joined.map(stem));
+  // Words of a name that match a cue word (same stem), in cue order.
+  const hitsIn = (parts) => {
+    const ps = new Set(parts.map(stem));
+    return cues.words.filter((w) => ps.has(stem(w)));
+  };
+  const dirCache = new Map(); // thousands of files share a folder
   for (const f of files) {
     const segs = f.path.split('/');
     const base = segs.pop();
     const baseName = base.replace(/\.[^.]+$/, '');
     const mentioned = cues.paths.some((p) => f.path === p || f.path.endsWith(`/${p}`) || base === p);
-    const nameHit = !GENERIC_PATH.has(baseName.toLowerCase()) && allWords.some((w) => wordsMatch(w, baseName));
-    const dirParts = splitWords(segs.join('/')).filter((p) => !GENERIC_PATH.has(p));
-    const dirHits = cues.words.filter((w) => dirParts.some((p) => wordsMatch(w, p)));
+    const nameHit = !GENERIC_PATH.has(baseName.toLowerCase()) && allStems.has(stem(baseName));
+    const dir = segs.join('/');
+    let dirHits = dirCache.get(dir);
+    if (!dirHits) dirCache.set(dir, (dirHits = hitsIn(splitWords(dir).filter((p) => !GENERIC_PATH.has(p)))));
     const fileScore = (mentioned ? 10 : 0) + (nameHit ? 6 : 0) + 2 * dirHits.length;
     const fileWhy = [...(mentioned ? [base] : []), ...(nameHit ? [baseName] : []), ...dirHits];
 
@@ -123,10 +138,10 @@ export function locate(prompt, root, opts = {}) {
       const why = [];
       if (identSet.has(s.name)) { score += 10; why.push(s.name); }
       else if (identLower.has(s.name.toLowerCase())) { score += 8; why.push(s.name); }
-      else if (cues.joined.some((j) => wordsMatch(j, s.name))) { score += 8; why.push(s.name); }
+      else if (joinedStems.has(stem(s.name))) { score += 8; why.push(s.name); }
       else {
         const parts = splitWords(s.name);
-        const hits = cues.words.filter((w) => parts.some((p) => wordsMatch(w, p)));
+        const hits = hitsIn(parts);
         if (hits.length) {
           score += 3 * hits.length + (hits.length >= parts.length ? 2 : 0);
           why.push(...hits);

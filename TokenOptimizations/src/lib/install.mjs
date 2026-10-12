@@ -3,11 +3,14 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rm
 import { dirname, join, relative, resolve } from 'node:path';
 import { KIT_DIR } from './config.mjs';
 import { writeMap } from './repomap.mjs';
+import { fmtTokens } from './tokens.mjs';
 
 const START = '<!-- tokenkit:start -->';
 const END = '<!-- tokenkit:end -->';
 const MERGE = new Set(['.github/copilot-instructions.md']);
-const GITIGNORE = ['.tokenkit/logs/', '.tokenkit/repomap.md', '.tokenkit/handoff.md'];
+const GITIGNORE = ['.tokenkit/logs/', '.tokenkit/repomap.md', '.tokenkit/areas.md', '.tokenkit/cache/', '.tokenkit/handoff.md'];
+// Generated per repo; never copied from the kit into a target.
+const GENERATED = new Set(['logs', 'repomap.md', 'areas.md', 'cache']);
 
 const sha = (s) => createHash('sha256').update(s.replace(/\r\n/g, '\n')).digest('hex').slice(0, 16);
 
@@ -43,7 +46,7 @@ export function install(targetArg, { dryRun = false, force = false } = {}) {
       recursive: true,
       filter: (src) => {
         const rel = relative(KIT_DIR, src).replace(/\\/g, '/');
-        if (rel === 'logs' || rel.startsWith('logs/') || rel === 'repomap.md') return false;
+        if (GENERATED.has(rel.split('/')[0])) return false;
         if (rel === 'config.json' && existsSync(join(kitDest, 'config.json'))) return false;
         return true;
       }
@@ -110,7 +113,7 @@ export function install(targetArg, { dryRun = false, force = false } = {}) {
   // 4. First repo map
   if (!dryRun) {
     const r = writeMap(target, join(kitDest, 'repomap.md'));
-    log.push(`map       .tokenkit/repomap.md (${r.files} files, ~${r.tokens} tokens, level ${r.level})`);
+    log.push(`map       .tokenkit/repomap.md (${r.files} files, ~${fmtTokens(r.tokens)} tokens${r.overview ? '; grep-only, folder overview in .tokenkit/areas.md' : ''})`);
   }
   return log;
 }

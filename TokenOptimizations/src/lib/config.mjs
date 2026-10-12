@@ -8,7 +8,8 @@ export const LOG_DIR = process.env.TOKENKIT_LOG_DIR || join(KIT_DIR, 'logs');
 
 export const DEFAULTS = {
   run: {
-    maxLines: 80,        // hard cap on lines returned to the model
+    maxLines: 80,        // cap on head, tail and context lines returned to the model
+    maxErrorLines: 150,  // separate budget for error lines and their file:line locations
     headLines: 6,        // always keep the first N lines (command banner, config)
     tailLines: 20,       // always keep the last N lines (summaries live here)
     successTail: 8,      // on exit 0, keep only this much tail
@@ -44,10 +45,15 @@ export const DEFAULTS = {
     minScore: 5          // 10 = exact identifier/file name, 8 = 2+ name words, 5 = one whole-name word
   },
   map: {
-    maxTokens: 4000,
+    maxTokens: 4000,     // above this the map is grep-only and .tokenkit/areas.md gives a folder overview
     maxAgeMinutes: 60,
-    maxFileKB: 256,
+    maxFileKB: 256,      // bigger files are listed by path only
     exclude: []
+  },
+  verify: {
+    // Explicit checks instead of auto-detection, e.g.
+    // [{ "label": "api:test", "cwd": "src/Backend", "cmd": "dotnet test Contoso.sln -v q" }]
+    checks: []
   },
   budget: {
     alwaysOnTokens: 1200,

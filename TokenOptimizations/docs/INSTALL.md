@@ -84,8 +84,8 @@ created   .github/prompts/spec.prompt.md
 created   .github/skills/lean-explore/SKILL.md
 created   .github/skills/lean-verify/SKILL.md
 created   .vscode/settings.json
-updated   .gitignore (+.tokenkit/logs/, .tokenkit/repomap.md, .tokenkit/handoff.md)
-map       .tokenkit/repomap.md (1 files, ~65 tokens, level 0)
+updated   .gitignore (+.tokenkit/logs/, .tokenkit/repomap.md, .tokenkit/areas.md, .tokenkit/cache/, .tokenkit/handoff.md)
+map       .tokenkit/repomap.md (1 files, ~14 tokens)
 ```
 
 What each word means:
@@ -124,11 +124,11 @@ tokenkit doctor: D:\code\my-app
   [ok]   hook file registers 4 events
   [ok]   guard hook runs and blocks a lockfile read
   [ok]   guard hook routes `npm test` through tk run
-  [ok]   userPromptSubmitted hook runs (exit 0)
-  [ok]   postToolUse hook runs (exit 0)
-  [ok]   sessionStart hook runs (exit 0)
+  [ok]   userPromptSubmitted hook runs (0.2s of its 10s limit, refreshing a stale map)
+  [ok]   postToolUse hook runs (0.1s of its 10s limit)
+  [ok]   sessionStart hook runs (0.2s of its 30s limit, refreshing a stale map)
   [ok]   tokenkit block in .github/copilot-instructions.md
-  [ok]   repo map present (1 source files)
+  [ok]   repo map present (1 source files, ~14 tokens)
   [ok]   .gitignore keeps .tokenkit/logs/ out of git
   [ok]   .tokenkit/ will be committed with the repo
   [ok]   always-on context ~324 tokens (budget 1200)
@@ -138,6 +138,7 @@ All local checks passed.
 
 - `[FAIL]` lines say what is wrong and how to fix it, and the command exits with code 1.
 - `[warn]` lines are advice; tokenkit still works.
+- Each hook row shows its time against VS Code's timeout. On a large repo, or a folder holding several repos, see [Large repos, frontend + backend, and several repos](../README.md#large-repos-frontend--backend-and-several-repos).
 
 ## Step 6 — Review and commit
 
@@ -145,7 +146,7 @@ All local checks passed.
 git status --short
 ```
 
-You should see `.github/`, `.tokenkit/`, `.gitignore`, and `.vscode/` (if it was created). Logs, the repo map and handoff notes are already ignored.
+You should see `.github/`, `.tokenkit/`, `.gitignore`, and `.vscode/` (if it was created). Logs, the repo map (with its cache and folder overview) and handoff notes are already ignored.
 
 ```powershell
 git add .github .tokenkit .gitignore .vscode

@@ -21,16 +21,16 @@ function rotate(keep) {
 
 // The guard hook passes the shell the agent's tool would have used, so the
 // command keeps its syntax (PowerShell vs bash). Default: platform shell.
-function spawnIn(shell, cmd, env) {
-  if (shell === 'bash') return spawn('bash', ['-c', cmd], { env });
+function spawnIn(shell, cmd, env, cwd) {
+  if (shell === 'bash') return spawn('bash', ['-c', cmd], { env, cwd });
   if (shell === 'powershell') {
     const exe = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
-    return spawn(exe, ['-NoProfile', '-NonInteractive', '-Command', cmd], { env });
+    return spawn(exe, ['-NoProfile', '-NonInteractive', '-Command', cmd], { env, cwd });
   }
-  return spawn(cmd, { shell: true, env });
+  return spawn(cmd, { shell: true, env, cwd });
 }
 
-export function runCommand(args, { raw = false, shell, logRef = 'last', quietOk = false } = {}) {
+export function runCommand(args, { raw = false, shell, quietOk = false, cwd } = {}) {
   const cfg = loadConfig().run;
   const cmd = joinArgs(args);
   if (!cmd) {
@@ -39,7 +39,7 @@ export function runCommand(args, { raw = false, shell, logRef = 'last', quietOk 
   }
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = spawnIn(shell, cmd, { ...process.env, CI: process.env.CI ?? '1', FORCE_COLOR: '0', NO_COLOR: '1' });
+    const child = spawnIn(shell, cmd, { ...process.env, CI: process.env.CI ?? '1', FORCE_COLOR: '0', NO_COLOR: '1' }, cwd);
     const chunks = [];
     child.stdout.on('data', (d) => chunks.push(d));
     child.stderr.on('data', (d) => chunks.push(d));
@@ -70,7 +70,9 @@ export function runCommand(args, { raw = false, shell, logRef = 'last', quietOk 
       const saved = r.stats.rawTokens > r.stats.keptTokens
         ? ` · ${r.stats.rawLines}→${r.stats.keptLines} lines, ~${fmtTokens(r.stats.rawTokens)}→${fmtTokens(r.stats.keptTokens)} tokens`
         : '';
-      const lines = [`[tk] ${status} in ${secs}s${saved} · full log: .tokenkit/logs/${logRef === 'own' ? logName : 'last.log'}`];
+      // Name this run's own log: last.log is overwritten by the next run, and
+      // the agent may grep this output several commands later.
+      const lines = [`[tk] ${status} in ${secs}s${saved} · full log: .tokenkit/logs/${logName}`];
       if (r.notes.length && !(quietOk && exitCode === 0)) lines.push(`[tk] ${r.notes.join('; ')}`);
       if (r.text && !(quietOk && exitCode === 0)) lines.push(r.text);
       process.stdout.write(lines.join('\n') + '\n');

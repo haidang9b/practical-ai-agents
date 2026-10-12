@@ -224,8 +224,8 @@ Mọi hook đều theo cùng một khung, `runHook` (`hookio.mjs:88`):
 
 ### 4.1 `sessionStart` (`hooks/session.mjs`)
 
-1. Gọi `mapIsStale(root, mapFile)` (`repomap.mjs:184`).
-2. Nếu map đã cũ, gọi `writeMap` và ghi lý do vào `session.jsonl`.
+1. Gọi `mapIsStale(root, mapFile)` (`repomap.mjs:242`).
+2. Nếu map đã cũ, gọi `writeMap` (tăng dần: chỉ đọc lại các tệp đã thay đổi, xem mục 9.4) và ghi lý do vào `session.jsonl`.
 3. Không in gì. Hook này tồn tại để giữ map luôn mới, không phải để thêm ngữ cảnh.
 
 ### 4.2 `userPromptSubmitted` (`hooks/prompt.mjs`)
@@ -296,12 +296,12 @@ Vậy `ước lượng(văn bản) = Σ_đoạn giá(đoạn)`. Chú thích tron
 
 ## 6. Bộ nén đầu ra
 
-`compress(raw, opts)` (`lib/compress.mjs:55`) biến đầu ra của một lệnh thành một bản ngắn hơn, giữ lại những gì agent cần để hành động. Nó là một đường ống gồm sáu pha.
+`compress(raw, opts)` (`lib/compress.mjs:72`) biến đầu ra của một lệnh thành một bản ngắn hơn, giữ lại những gì agent cần để hành động. Nó là một đường ống gồm sáu pha.
 
 ### 6.1 Pha 1: chuẩn hóa
 
 - Bỏ các chuỗi escape ANSI (màu, di chuyển con trỏ).
-- Đổi `\r\n` thành `\n`. Với dòng có `\r` đứng riêng (thanh tiến trình tự ghi đè), chỉ giữ đoạn cuối cùng, tức trạng thái cuối.
+- Đổi `\r\n` thành `\n`. Với dòng có `\r` đứng riêng (thanh tiến trình tự ghi đè), giữ đoạn cuối cùng (trạng thái cuối), cùng mọi đoạn trước đó là lỗi. Nếu không, `error: EADDRINUSE …\r building... 40%` sẽ mất lỗi vào dòng tiến trình.
 - Bỏ khoảng trắng cuối dòng và các dòng trống ở cuối.
 
 ### 6.2 Pha 2: phân loại từng dòng
@@ -313,12 +313,16 @@ Mỗi dòng nhận đúng một kết quả, kiểm tra theo thứ tự sau:
 | 1 | `LIB_FRAME` (khung stack từ `node_modules`, `node:internal`, site-packages của JVM/.NET/Python, std của Rust, runtime của Go) | Gộp thành một dấu `… N library frame line(s)` | `frames` |
 | 2 | `NOISE` (thanh tiến trình, `npm warn`, `Downloading …`, `Compiling … v1.2.3`, siêu dữ liệu TAP, và mọi regex do người dùng thêm) | Bỏ | `noise` |
 | 3 | `PASS` (`✓`, `PASS`, `ok 12 -`, `--- PASS:`, `test x ... ok`) **và dòng không chứa `fail` hoặc `error`** | Bỏ | `passed` |
-| 4 | mọi dòng còn lại | Giữ | `warnings` nếu khớp `WARN` |
+| 4 | dòng lỗi có vị trí mã nguồn (`ERROR` và `LOCATION`) đã xuất hiện trước đó | Bỏ (chỉ hiện một lần) | `repeats` |
+| 5 | mọi dòng còn lại | Giữ | `warnings` (các dòng khác nhau) nếu khớp `WARN` |
 
-Hai chi tiết quan trọng:
+Luật 4 dành cho MSBuild, vốn in mọi lỗi trong lúc build rồi in lại trong phần tổng kết. Bỏ bản thứ hai giúp dành ngân sách cho các lỗi khác. Chỉ những dòng có vị trí `file:line` mới được xử lý như vậy, nên các dòng mẫu như `Error Message:` trong mỗi test .NET thất bại không bị bỏ.
+
+Ba chi tiết quan trọng:
 
 - Luật `PASS` có một ngoại lệ. Dòng như `✓ handles error paths` chứa `error`, nên được giữ. Việc giấu một dòng có thể nói "failed" là một sai lầm nguy hiểm.
 - Traceback của Python in một dòng mã sau mỗi dòng `File "…"`. Khi `LIB_FRAME` khớp một dòng `File` bên trong thư viện, dòng thụt lề kế tiếp (mã nguồn của khung đó) cũng được gộp (`skipPyCode`).
+- `ERROR` (`compress.mjs:49`) nhận ra nhiều hơn chữ "error". Nó còn khớp `fail`, `failing`, `exception`, `panic`, `traceback`, `assert…`, `expected`/`received`, tên lớp ngoại lệ (`ValueError:`, `System.InvalidOperationException:`), `aborted`, `crashed`, `timed out`, `unhandled`, `killed`, `out of memory`, `stack overflow`, mã lỗi của Node (`EADDRINUSE`, `ENOENT`, …), nửa `Actual:` và `But was:` của assertion xUnit/NUnit, và các dấu như `✗`, `●` và `> 12 |`.
 
 Các dòng giữ lại giống hệt nhau và liền nhau được gộp kèm số lần lặp: `line  (×8)`.
 
@@ -342,12 +346,15 @@ Gọi `rows` là danh sách sau khi gộp, và `cap` là giới hạn số dòng
 - Khi **thất bại** (`exitCode ≠ 0`): `head = 6`, `tail = 20`, `cap = maxLines = 80`.
 - Khi **thành công**: `head = 0`, `tail = successTail = 8`, `cap = 2 × successTail = 16`.
 
-Nếu `rows.length ≤ cap`, giữ tất cả. Nếu không:
+Nếu `rows.length ≤ cap`, giữ tất cả. Nếu không, có hai ngân sách. Dòng lỗi và vị trí của chúng có ngân sách riêng, `maxErrorLines` (150; khi thành công là `successTail`). Phần đầu, phần cuối và ngữ cảnh dùng chung giới hạn dòng. Vì vậy ngữ cảnh không bao giờ đẩy một lỗi ra ngoài.
 
 1. Giữ `head` dòng đầu và `tail` dòng cuối.
-2. Với mỗi dòng lỗi, theo thứ tự, thêm một cửa sổ `±context` dòng (`context = 2`) quanh nó. Cửa sổ chỉ được thêm nếu `keep.size + window ≤ cap`. Nếu không, lỗi đó được đếm là đã bỏ (`droppedErrorLines`), và ghi chú yêu cầu agent grep log.
+2. **Lỗi và vị trí của chúng.** Với mỗi dòng lỗi, theo thứ tự, giữ dòng đó cùng tối đa 3 dòng `LOCATION` ở mỗi phía: trong phạm vi 8 dòng, và không vượt qua một dòng lỗi khác. `LOCATION` (`compress.mjs:60`) khớp một khung stack hoặc con trỏ của trình biên dịch tới một tệp và dòng: `in X.cs:line 42`, `(src/a.test.tsx:11:21)`, `File "/app/x.py", line 4`, `Foo.java:12`, `--> src/main.rs:4:18`, `x.go:14:`. Đây là thứ giữ lại khung stack của một test .NET thất bại, vốn nằm sau `Actual: 81` 3 dòng, ngoài mọi cửa sổ ±2. Nó cũng giữ các dòng `File "…"` gần nhất trước một ngoại lệ Python. Khung thư viện không bao giờ tới bước này; pha 2 đã gộp chúng.
+3. **Gộp lỗi lặp lại.** Một lỗi mà nội dung, sau khi bỏ vị trí, đã xuất hiện `FOLD_AFTER` (3) lần thì không hiện nữa. Nó được đếm theo từng thông báo, kèm số tệp. Đây là trường hợp "đổi tên một kiểu, 400 tệp báo CS0246". Nếu không gộp, 150 bản sao của một thông báo sẽ dùng hết ngân sách, và một lỗi *khác* in sau đó sẽ bị cắt.
+4. Nếu ngân sách lỗi hết, các dòng lỗi còn lại được đếm (`droppedErrorLines`). Ghi chú nêu mã lỗi của chúng và số tệp chứa chúng.
+5. **Ngữ cảnh.** Với mỗi lỗi được giữ, theo thứ tự, thêm một cửa sổ `±context` dòng (`context = 2`), trong khi giới hạn dòng còn cho phép. Các lỗi đầu tiên được thêm ngữ cảnh trước, vì chúng thường là nguyên nhân gốc, còn các lỗi sau thường là hệ quả dây chuyền.
 
-Thứ tự này mã hóa một giả định: **lỗi đầu tiên thường là nguyên nhân gốc, còn các lỗi sau thường là hệ quả dây chuyền.** Vì vậy các cửa sổ được cấp theo thứ tự đến trước được phục vụ trước. Việc chọn là tham lam, không tối ưu, nhưng có độ phức tạp O(n) và có thể dự đoán được.
+Việc chọn là tham lam, không tối ưu, nhưng có độ phức tạp O(n) và có thể dự đoán được.
 
 ### 6.5 Pha 5: kết xuất với dấu khoảng trống
 
@@ -355,7 +362,15 @@ Các dòng được giữ được xuất theo thứ tự. Mỗi khoảng trốn
 
 ### 6.6 Pha 6: báo cáo những gì đã bị loại
 
-`notes` tóm tắt phần bị loại: số dòng test pass đã ẩn, số dòng nhiễu đã ẩn, số khung thư viện đã gộp, số cảnh báo vẫn còn trong log, và số lỗi về sau đã bị cắt. Bên gọi in chúng dưới dạng `[tk] …`, để agent biết nó đã không thấy gì.
+`notes` tóm tắt phần bị loại, để agent biết nó đã không thấy gì. Bên gọi in chúng dưới dạng `[tk] …`. Chúng gồm:
+
+- số dòng test pass đã ẩn, số dòng nhiễu đã ẩn, số khung thư viện đã gộp;
+- số dòng lỗi lặp lại chỉ hiện một lần;
+- số cảnh báo còn trong log, kèm các mã phổ biến nhất (`60 warning line(s) in full log (CS8618 ×60)`);
+- các lỗi đã gộp, theo từng thông báo: `same error at 1478 more location(s) in 225 file(s): "error CS0246: The type or namespace name 'OrderDto' could not be found"`;
+- các lỗi vượt ngân sách, kèm mã và số tệp: `24 more error line(s) not shown (TS2304 ×24) in 12 file(s); grep the log`.
+
+Tiêu đề `[tk]` ghi tên log riêng của lần chạy, `.tokenkit/logs/run-<timestamp>.log`. `last.log` vẫn được ghi, nhưng lần chạy kế tiếp sẽ ghi đè nó, trong khi agent có thể grep một lỗi sau vài lệnh nữa.
 
 ### 6.7 Một ví dụ thực tế
 
@@ -379,11 +394,27 @@ Ghi chú: `50 passing-test line(s) hidden`. Kích thước: vào 254 dòng và k
 - **Lý thuyết thông tin theo cách đơn giản.** Đầu ra phần lớn là dư thừa (lặp, dòng pass, khung stack). Bộ nén loại bỏ phần dư thừa theo mẫu, và giữ lại các dòng hiếm nhưng quan trọng (lỗi) cùng các mốc cấu trúc (phần đầu và dòng tổng kết ở cuối).
 - **Giới hạn bất đối xứng.** Trường hợp thất bại được ngân sách lớn hơn trường hợp thành công, vì khi thành công chỉ cần dòng tổng kết, còn khi thất bại cần chi tiết.
 - **Cửa sổ lỗi.** Một dòng lỗi không có các dòng lân cận thường vô nghĩa (`expected 3` mà thiếu tên test). Cửa sổ ±2 dòng giữ ngữ cảnh mà một lỗi cần.
+- **Không đánh đổi lỗi lấy token.** Cắt một lỗi để tiết kiệm 30 token thường tốn thêm một lần chạy đầy đủ, với toàn bộ hội thoại được gửi lại, khi agent phát hiện phần còn lại. Vì vậy các lỗi khác nhau được giữ tới `maxErrorLines`. Chỉ phần dư thừa bị loại: bản lặp, các bản sao đã gộp của cùng một thông báo, và khung stack.
+
+Đo bằng bộ nén cũ và bộ nén mới trên cùng đầu vào. Đầu vào là các đầu ra tổng hợp có hình dạng giống các lần chạy thật của dotnet, tsc, jest và MSBuild; các hình dạng đó cũng có trong `test/compress.test.mjs`. Ngoài ra có một lần chạy `node --test` thật. "Dữ kiện" là các chuỗi mà agent cần: `file:line` của từng test thất bại, giá trị thực tế, mọi lỗi khác nhau, và dòng tổng kết.
+
+| Đầu ra | Token gốc | Cũ: token, dữ kiện giữ được | Mới: token, dữ kiện giữ được |
+|---|---|---|---|
+| `dotnet test`, 3 lỗi giữa 1.000 dòng log đa dạng | 25,7k | 959, 8/11 (mất mọi `OrderTests.cs:line N`) | 1.078, 11/11 |
+| jest, 12 lỗi trong 665 dòng | 8,9k | 582, 8/25 (mất mọi `file:line`) | 1.543, 25/25 |
+| tsc, 150 lỗi khác nhau | 4,7k | 2.437, 79/151 | 4.658, 151/151 |
+| MSBuild, 40 lỗi lặp lại trong phần tổng kết, 60 cảnh báo | 15,3k | 4.864, 42/42 | 3.443, 42/42 |
+| 2.001 lỗi, 2.000 lỗi cùng một thông báo | 81k | 3.231, mất lỗi khác biệt duy nhất | 3.398, giữ được lỗi khác biệt |
+| lỗi nằm sau một lần cập nhật tiến trình bằng `\r` | 2,4k | 50, 0/1 | 66, 1/1 |
+| `node --test`, 251 test, 1 thất bại | 9,7k | 313 | 313 (giống hệt) |
 
 ### 6.9 Giới hạn của phương pháp heuristic
 
 - `ERROR` khớp từ `error` ở bất cứ đâu, nên dòng tổng kết thành công như `0 errors` bị coi là dòng lỗi và được giữ. Điều này an toàn (giữ nhiều hơn), nhưng không tối giản.
 - Các luật là biểu thức chính quy được chỉnh cho công cụ phổ biến. Một công cụ lạ không khớp luật nào chỉ được nén bằng các pha tổng quát (gộp, đầu/cuối).
+- Một dòng quan trọng không khớp `ERROR` lẫn `LOCATION`, và cách mọi lỗi hơn 2 dòng, vẫn có thể bị cắt khỏi một đầu ra dài. Hãy thêm một mẫu `run.errors` cho nó. Log đầy đủ luôn có dòng đó.
+- Việc gộp coi hai lỗi là "giống nhau" khi nội dung của chúng trùng khớp sau khi bỏ phần `path(line,col):` ở đầu và `[project]` ở cuối. Các lỗi chỉ khác nhau ở một định danh (`'v1'`, `'v2'`) là khác nhau và đều được giữ.
+- Các dòng `warn:` của framework ghi log được đếm là cảnh báo.
 - Tùy chọn `config.run.noise` và `config.run.errors` cho phép một dự án thêm luật riêng.
 
 ---
@@ -452,22 +483,30 @@ Nếu không, lệnh là `suspicious` và bị từ chối. Đây là một ki�
 3. Thiết lập môi trường: `CI=1` nếu chưa đặt (nhiều công cụ khi đó bỏ qua hỏi tương tác và thanh tiến trình), `FORCE_COLOR=0`, và `NO_COLOR=1`.
 4. Đệm stdout và stderr cùng nhau.
 5. Ghi toàn bộ đầu ra vào `run-<timestamp>.log` và `last.log`, và xoay vòng các log cũ để giữ `keepLogs` (10).
-6. Trừ khi có `--raw`, nén đầu ra kèm mã thoát và in tiêu đề: `[tk] OK in 3.2s · 1540→29 lines, ~10k→~300 tokens · full log: .tokenkit/logs/last.log`, theo sau là các ghi chú và văn bản đã nén.
+6. Trừ khi có `--raw`, nén đầu ra kèm mã thoát và in tiêu đề: `[tk] OK in 3.2s · 1540→29 lines, ~10k→~300 tokens · full log: .tokenkit/logs/run-<timestamp>.log`, theo sau là các ghi chú và văn bản đã nén.
 7. Thêm một dòng JSON vào `runs.jsonl` (số token gốc và số token giữ lại), phục vụ `tk report`.
 
 Hai chi tiết: `timeoutSec` mặc định là 0 (không có thời gian chờ), và một tiến trình con không khởi động được được báo là mã thoát 127 với thông báo lỗi trong log.
 
 ### 8.2 `tk verify`
 
-`verify` (`lib/verify.mjs:52`) chạy mọi kiểm tra chuẩn trong một lần gọi, nên agent thực hiện một lệnh gọi công cụ thay vì nhiều lệnh. `detectChecks` (`verify.mjs:23`) chọn lệnh:
+`verify` (`lib/verify.mjs:117`) chạy mọi kiểm tra chuẩn trong một lần gọi, nên agent thực hiện một lệnh gọi công cụ thay vì nhiều lệnh.
+
+**Tìm dự án.** `findProjects` (`verify.mjs:41`) tìm các tệp khai báo dự án ở gốc repo và trong các thư mục con sâu tối đa 4 cấp, dùng cùng danh sách tệp với repo map (nên `.gitignore`, `node_modules` và repo lồng nhau được xử lý giống nhau). Một repo có `src/Frontend/package.json` và `src/Backend/Contoso.sln` có hai dự án. Tệp khai báo đã được thư mục cha bao phủ thì bị bỏ: các tệp `.csproj` dưới một thư mục có `.sln`, các gói dưới gốc workspace JS (`"workspaces"` hoặc `pnpm-workspace.yaml`), và các crate dưới một `Cargo.toml` có `[workspace]`.
+
+**Chọn lệnh.** `detectChecks` (`verify.mjs:101`) gán cho mỗi thư mục dự án các kiểm tra ứng với mọi loại tệp khai báo nó chứa:
 
 - **Dự án Node** (`package.json`): tra tên script theo thứ tự ưu tiên. Typecheck: `typecheck`, `type-check`, `tsc`, `check-types`, `types`. Lint: `lint`. Test: `test`, `test:unit`, `unit`. Build (chỉ khi có `--build`): `build`. Script có chữ `watch` bị bỏ qua. Trình quản lý gói lấy từ lockfile (`pnpm-lock.yaml`, `yarn.lock`, `bun.lock[b]`, nếu không thì npm).
 - **Python** (`pyproject.toml`, `pytest.ini`, `setup.py`): `python -m pytest -q`.
 - **Go** (`go.mod`): `go vet ./...`, `go test ./...`.
 - **Rust** (`Cargo.toml`): `cargo check -q`, `cargo test -q`.
-- **.NET** (`.sln`, `.csproj`, `.fsproj`): `dotnet build -v q`, `dotnet test -v q --no-build`.
+- **.NET** (`.sln`, `.slnx`, `.csproj`, `.fsproj`): `dotnet build <tệp> -v q`, `dotnet test <tệp> -v q --no-build`. Tên tệp được ghi rõ vì `dotnet build` từ chối một thư mục chứa nhiều hơn một project hoặc solution. Khi build thất bại, lệnh test `--no-build` của nó được báo là `SKIPPED (build failed)` thay vì lặp lại lỗi build.
 
-Mỗi kiểm tra chạy qua `runCommand` với `quietOk`, nên kiểm tra thành công chỉ in tiêu đề một dòng, còn kiểm tra thất bại in đầu ra đã nén. Mã thoát là 1 nếu có bất kỳ kiểm tra nào thất bại. Dòng cuối là tóm tắt: `[tk] verify: typecheck OK · lint OK · test FAILED`.
+Một `verify.checks` không rỗng trong cấu hình sẽ thay thế việc dò tìm: `[{ "label": "api:test", "cwd": "src/Backend", "cmd": "dotnet test Contoso.sln -v q" }]`.
+
+Mỗi kiểm tra chạy trong thư mục dự án của nó qua `runCommand` với `quietOk`, nên kiểm tra thành công chỉ in tiêu đề một dòng, còn kiểm tra thất bại in đầu ra đã nén. Mã thoát là 1 nếu có bất kỳ kiểm tra nào thất bại. Dòng cuối là tóm tắt: `[tk] verify: typecheck OK · lint OK · test FAILED`. Kiểm tra nằm ngoài gốc repo mang theo tên thư mục: `src/Frontend:test OK · src/Backend:build FAILED`.
+
+**`--in <dir>`** giữ các dự án nằm trong `dir`; khi `dir` nằm bên trong một dự án (`--in src/Frontend/src/cart`), nó giữ dự án đó. Nhờ vậy một thay đổi ở frontend không phải build cả solution 9.000 tệp.
 
 ---
 
@@ -477,18 +516,27 @@ Repo map (`.tokenkit/repomap.md`) là một chỉ mục ký hiệu, mỗi tệp 
 
 ### 9.1 Xây dựng danh sách tệp
 
-`listFiles` (`repomap.mjs:111`) hỏi git các tệp đã theo dõi và các tệp chưa theo dõi nhưng không bị bỏ qua: `git ls-files --cached --others --exclude-standard`. Cách này tự động tôn trọng `.gitignore`. Nếu thư mục không phải kho git, hoặc kết quả rỗng (ví dụ khi một repo cha bỏ qua thư mục này), nó duyệt cây thư mục và bỏ qua `.git`, `node_modules`, `dist`, `build`, `target`, môi trường ảo, cache, và các thư mục khác trong `SKIP_DIRS`.
+`listFiles` (`repomap.mjs:117`) hỏi git các tệp đã theo dõi và các tệp chưa theo dõi nhưng không bị bỏ qua: `git ls-files --cached --others --exclude-standard`. Cách này tự động tôn trọng `.gitignore`. Nếu thư mục không phải kho git, hoặc kết quả rỗng (ví dụ khi một repo cha bỏ qua thư mục này), nó duyệt cây thư mục và bỏ qua `.git`, `node_modules`, `dist`, `build`, `target`, môi trường ảo, cache, và các thư mục khác trong `SKIP_DIRS`.
 
-`buildMap` (`repomap.mjs:143`) sau đó giữ các tệp:
+**Repo lồng nhau** được liệt kê bằng git của chính chúng, nên `.gitignore` riêng của mỗi repo được áp dụng:
 
-- có phần mở rộng trong bảng ngôn ngữ (`LANGS`, `repomap.mjs:18`): họ JavaScript và TypeScript, Python, Go, C#, Java, Kotlin, Scala, Rust, PHP, Ruby;
+- git hiển thị một repo chưa theo dõi nằm trong repo dưới dạng một mục `dir/`; `listFiles` đệ quy vào đó;
+- submodule (các đường dẫn trong `.gitmodules`) được mở rộng theo cùng cách;
+- khi duyệt một thư mục thường, thư mục con có mục `.git` được liệt kê bằng git thay vì duyệt.
+
+Nhờ vậy một lần cài đặt có thể bao phủ một thư mục chứa repo frontend và repo backend. Repo lồng nhau bị `.gitignore` của repo cha bỏ qua thì không được liệt kê.
+
+`sourceFiles` (`repomap.mjs:168`) sau đó giữ các tệp:
+
+- có phần mở rộng trong bảng ngôn ngữ (`LANGS`, `repomap.mjs:21`): họ JavaScript và TypeScript, Python, Go, C#, Java, Kotlin, Scala, Rust, PHP, Ruby;
 - không phải tệp sinh ra (`.min.js`, `.d.ts`, `.g.cs`, `_pb2.py`, `.pb.go`, và tương tự, `GENERATED`);
-- không nằm trong `config.map.exclude`;
-- có kích thước tối đa `maxFileKB` (256 KB).
+- không nằm trong `config.map.exclude`.
+
+`buildMap` (`repomap.mjs:178`) trích xuất ký hiệu từ từng tệp. Tệp lớn hơn `maxFileKB` (256 KB) và tệp không đọc được chỉ được liệt kê đường dẫn. Chúng vẫn được đếm, điều này quan trọng với việc kiểm tra độ cũ (mục 9.4).
 
 ### 9.2 Trích xuất ký hiệu
 
-`extractSymbols(text, ext)` (`repomap.mjs:78`) là một **bộ quét dòng bằng biểu thức chính quy**, không phải bộ phân tích cú pháp. Với mỗi dòng, nó thử:
+`extractSymbols(text, ext)` (`repomap.mjs:81`) là một **bộ quét dòng bằng biểu thức chính quy**, không phải bộ phân tích cú pháp. Với mỗi dòng, nó thử:
 
 1. **Mẫu cấp cao nhất** (`lang.top`). Với JavaScript: `export function|class|const …`, `function name`, `class name`, `const name = (…) =>`, `module.exports.name =`. Với Python: `class`, `def`. Với Go: `func (recv) name`, `func name`, `type name`. Các ngôn ngữ khác tương tự. Lần khớp đầu tiên ghi `{name, line}` và đặt **trạng thái lớp** `inClass` nếu dòng mở một lớp.
 2. **Mẫu phương thức** (`lang.method`), chỉ bên trong thân lớp (hoặc luôn luôn với C#, Java, Kotlin, vốn khai báo phương thức có từ khóa bổ nghĩa). Một phương thức được ghi là `.name:line`, tối đa `MAX_METHODS = 15` mỗi tệp, và các từ khóa như `if`, `for`, `return` bị loại.
@@ -498,34 +546,55 @@ Repo map (`.tokenkit/repomap.md`) là một chỉ mục ký hiệu, mỗi tệp 
 
 Giới hạn của cách này: chữ ký nhiều dòng, mã sinh ra lúc chạy, và định dạng bất thường có thể bị bỏ sót. Map là một **chỉ mục gợi ý**, và chỉ dẫn yêu cầu agent đọc đoạn và xác nhận.
 
-### 9.3 Vừa ngân sách token: các mức suy giảm
+### 9.3 Repo lớn: map chỉ để grep và bản tổng quan thư mục
 
-Map phải đủ nhỏ, vì agent đọc lại nó. `buildMap` thử các mức chi tiết từ giàu nhất đến nghèo nhất, và dừng ở mức đầu tiên vừa `maxTokens` (4000):
+Agent được dặn **grep** map, không bao giờ đọc cả tệp, và guard từ chối việc đọc cả tệp lớn hơn `guard.maxReadKB` (48 KB). Vì vậy map luôn liệt kê mọi tệp mã nguồn với đầy đủ chi tiết, bất kể kích thước. Tiêu đề ghi kích thước: `# Repo map · 10501 source files · ~1.3M tokens · …`.
 
-| Mức | Giữ lại | Dùng khi |
-|---|---|---|
-| 0 | mọi ký hiệu và phương thức | repo nhỏ và vừa |
-| 1 | chỉ ký hiệu cấp cao nhất (không có phương thức) | repo lớn hơn |
-| 2 | như mức 1, và tệp test chỉ liệt kê đường dẫn | repo nhiều test |
-| 3 | chỉ đường dẫn | repo rất lớn |
-| 4 | số tệp theo thư mục (`src/lib/ (14 files)`) | repo khổng lồ; luôn được chấp nhận |
+Các phiên bản trước giảm chi tiết để vừa `maxTokens` (4.000): bỏ phương thức, rồi chỉ còn đường dẫn, rồi chỉ còn số tệp theo thư mục. Cách đó thất bại với repo lớn. 10.000 tệp không vừa 4.000 token ngay cả khi chỉ là đường dẫn (khoảng 150k token), nên map tụt xuống số tệp theo thư mục, không trả lời được "tệp nào" lẫn "dòng nào". Bộ so khớp vị trí (mục 10) cũng không còn gì để khớp.
 
-Vòng lặp là `for level in 0..4: text = render(level); if tokens(text) ≤ maxTokens hoặc level = 4: return`. Tiêu đề ghi mức (`detail level 0/4`), nên người đọc biết còn thiếu bao nhiêu. Suy giảm là **giảm độ phân giải một cách có kiểm soát**: một map thô hơn vẫn trả lời được "thư mục nào", dù không còn trả lời được "dòng nào".
+Khi vượt `maxTokens`, có hai thay đổi:
+
+- Dòng tiêu đề thứ hai của map nói rằng nó quá lớn để đọc cả tệp, và chỉ đến bản tổng quan.
+- `buildOverview` (`repomap.mjs:215`) ghi `.tokenkit/areas.md`, một bản tổng quan thư mục nằm trong `maxTokens`. Nó liệt kê các thư mục kèm số tệp và các thư mục con đầu tiên, ở độ sâu thư mục lớn nhất còn vừa ngân sách:
+
+```text
+# Folder overview · 10501 source files · symbols: grep .tokenkit/repomap.md
+src/Backend/Contoso.Billing/ (450 files): Commands Configurations Controllers Dtos Entities … (+3)
+src/Frontend/src/ (1500 files): features
+```
+
+Bản tổng quan trả lời "khu vực nào"; grep map trả lời "tệp nào, dòng nào". Repo nhỏ không đổi: một map, không có bản tổng quan.
 
 ### 9.4 Độ cũ
 
-`mapIsStale(root, mapFile)` (`repomap.mjs:184`) trả về một chuỗi lý do, hoặc `null` khi map còn mới. Nó kiểm tra theo thứ tự và dừng ở lần khớp đầu tiên:
+`mapIsStale(root, mapFile)` (`repomap.mjs:242`) trả về một chuỗi lý do, hoặc `null` khi map còn mới. Nó kiểm tra theo thứ tự và dừng ở lần khớp đầu tiên:
 
 1. Map thiếu hoặc không đọc được: `missing`.
-2. Map cũ hơn `maxAgeMinutes` (60): `old`.
-3. Số tệp mã nguồn trong tiêu đề khác với số tệp hiện đang được liệt kê: `file count changed`. (Tệp mới hoặc bị xóa làm đổi số đếm.)
-4. Có tệp mã nguồn nào có `mtime` mới hơn map: `files changed`.
+2. Map được ghi bởi tokenkit phiên bản cũ (tiêu đề có `detail level`): `old format`.
+3. Map cũ hơn `maxAgeMinutes` (60): `old`.
+4. Số tệp mã nguồn trong tiêu đề khác với số tệp hiện đang được liệt kê: `file count changed`. (Tệp mới hoặc bị xóa làm đổi số đếm.)
+5. Có tệp mã nguồn nào có `mtime` mới hơn map: `files changed`.
 
-Kiểm tra này tốn một lần `git ls-files` và một lần `stat` cho mỗi tệp mã nguồn. Nó không đọc nội dung tệp. Điều đó rẻ với repo thông thường, và nó được chạy ở mọi prompt (`prompt.mjs`) và mọi lần bắt đầu phiên (`session.mjs`). Một repo có hàng chục nghìn tệp sẽ làm kiểm tra này chậm đáng kể. Đó là một giới hạn mở rộng đã biết.
+Kiểm tra này tốn một lần `git ls-files` và một lần `stat` cho mỗi tệp mã nguồn. Nó không đọc nội dung tệp, và được chạy ở mọi prompt (`prompt.mjs`) và mọi lần bắt đầu phiên (`session.mjs`).
+
+Kiểm tra 4 chỉ đúng khi hai bên đếm cùng một tập tệp. Đó là lý do `buildMap` và `mapIsStale` dùng chung `sourceFiles`, và lý do tệp quá lớn được liệt kê thay vì bị bỏ. Các phiên bản trước bỏ tệp lớn hơn `maxFileKB` (và tệp khớp `map.exclude`) khỏi map nhưng vẫn đếm chúng ở đây. Trong một repo chỉ cần có một tệp như vậy, ví dụ model snapshot của EF Core hoặc `Reference.cs` của WCF, map trông như cũ mãi mãi. Mỗi prompt lại xây dựng lại từ đầu và có thể vượt thời gian chờ 10 giây của hook prompt.
+
+**Xây dựng lại tăng dần.** `writeMap` (`repomap.mjs:261`) giữ một cache theo từng tệp trong `.tokenkit/cache/repomap.json` (`[mtime, size, symbols]` cho mỗi đường dẫn). Khi xây dựng lại, nó `stat` mọi tệp nhưng chỉ đọc lại các tệp có mtime hoặc kích thước thay đổi. Cache bị bỏ khi `maxFileKB` hoặc `CACHE_VERSION` (tăng khi bộ trích xuất thay đổi) khác đi.
+
+Đo trên một repo tổng hợp 10.500 tệp (9.000 C#, 1.500 TSX) trên Windows:
+
+| Bước | Thời gian |
+|---|---|
+| `mapIsStale` (liệt kê + 10.500 lần stat) | ~0,4 s |
+| xây dựng đầy đủ, không có cache | ~1,8 s khi đĩa đã được cache; lâu hơn nhiều khi đĩa nguội hoặc bị phần mềm diệt virus quét |
+| xây dựng lại có cache, không có gì thay đổi | ~0,6 s |
+| toàn bộ hook prompt (kiểm tra độ cũ, xây dựng lại, gợi ý) | ~1,5 s trên giới hạn 10 s |
+
+`tk doctor` chạy hook session và hook prompt trên một map cố ý để cũ, và báo thời gian của chúng so với `timeoutSec` của từng hook.
 
 ### 9.5 Phân giải `file#symbol`
 
-`findSymbol(root, path, name)` (`repomap.mjs:209`) chạy cùng bộ trích xuất trên tệp, tìm ký hiệu, và trả về khoảng của nó: từ dòng của ký hiệu đến dòng ngay trước ký hiệu kế tiếp. Với một phương thức, ký hiệu kế tiếp bất kỳ loại nào sẽ kết thúc khoảng. Với một ký hiệu cấp cao nhất, khoảng kết thúc trước ký hiệu cấp cao nhất kế tiếp, nên thân các phương thức của một lớp được bao gồm. Đây là cách `@src/cart.js#applyDiscount` trở thành `lines 6-7`.
+`findSymbol(root, path, name)` (`repomap.mjs:280`) chạy cùng bộ trích xuất trên tệp, tìm ký hiệu, và trả về khoảng của nó: từ dòng của ký hiệu đến dòng ngay trước ký hiệu kế tiếp. Với một phương thức, ký hiệu kế tiếp bất kỳ loại nào sẽ kết thúc khoảng. Với một ký hiệu cấp cao nhất, khoảng kết thúc trước ký hiệu cấp cao nhất kế tiếp, nên thân các phương thức của một lớp được bao gồm. Đây là cách `@src/cart.js#applyDiscount` trở thành `lines 6-7`.
 
 ---
 
@@ -584,7 +653,7 @@ Việc chọn gợi ý được thiết kế để thận trọng:
 
 ```text
 [tokenkit] Likely locations for this request (repo-map match on: compress). Read these ranges first; search only if they turn out wrong:
-- src/lib/compress.mjs:55-172  compress
+- src/lib/compress.mjs:72-257  compress
 ```
 
 ### 10.4 Ví dụ minh họa (chạy trên repo này)
@@ -593,7 +662,7 @@ Các ví dụ này lấy từ `tk locate --why` trên chính repo này.
 
 | Yêu cầu | Cue | Kết quả | Phép tính điểm |
 |---|---|---|---|
-| `compress collapses repeated lines` | từ: `compress`, `collapses`, `repeated` | `src/lib/compress.mjs:55-172 compress` | ký hiệu `compress`: khớp từ 3 + 2 (khớp đủ mọi phần) = 5; tên cơ sở `compress` +6; tổng 11 |
+| `compress collapses repeated lines` | từ: `compress`, `collapses`, `repeated` | `src/lib/compress.mjs:72-257 compress` | ký hiệu `compress`: khớp từ 3 + 2 (khớp đủ mọi phần) = 5; tên cơ sở `compress` +6; tổng 11 |
 | `where is the repo map built and when is it refreshed` | từ: `repo`, `map`, `built`, `refreshed`; ghép `repomap` | `buildMap` và `mapIsStale` trong `repomap.mjs` | tên cơ sở `repomap` khớp ghép `repomap` +6; ký hiệu `mapIsStale`: từ `map` 3; tổng 9 |
 | `classifyCommand decides the guard action` | định danh `classifyCommand`; từ `guard`, `action` | `rules.mjs:59-75 classifyCommand`, rồi `guard.mjs` | định danh đúng +10; tệp `guard.mjs` có từ `guard` trong tên cơ sở +6 |
 | `the discount is applied twice` | từ `discount`, `applied`, ghép `discountapplied` | không có gợi ý | repo này không có mã giảm giá, nên không ứng viên nào đạt ngưỡng sàn, và đầu ra ghi `no confident match` |
@@ -703,12 +772,12 @@ Bộ ước lượng đủ tốt để chọn giữa các luật nén, nhưng n�
 
 ### 14.1 Cài đặt làm gì
 
-`install(target, {dryRun, force})` (`install.mjs:29`) thực hiện bốn bước:
+`install(target, {dryRun, force})` (`install.mjs:32`) thực hiện bốn bước:
 
-1. **Runtime.** Sao chép `src/` vào `<target>/.tokenkit/`, bỏ qua `logs/`, `repomap.md`, và `config.json` đã có (cấu hình của người dùng được giữ lại).
+1. **Runtime.** Sao chép `src/` vào `<target>/.tokenkit/`, bỏ qua các tệp được sinh ra (`logs/`, `repomap.md`, `areas.md`, `cache/`) và `config.json` đã có (cấu hình của người dùng được giữ lại).
 2. **Template.** Với mỗi tệp dưới `templates/`, quyết định hành động (bảng dưới).
-3. **`.gitignore`.** Thêm `.tokenkit/logs/`, `.tokenkit/repomap.md`, và `.tokenkit/handoff.md` nếu còn thiếu.
-4. **Repo map.** Xây dựng `repomap.md` đầu tiên.
+3. **`.gitignore`.** Thêm `.tokenkit/logs/`, `.tokenkit/repomap.md`, `.tokenkit/areas.md`, `.tokenkit/cache/` và `.tokenkit/handoff.md` nếu còn thiếu.
+4. **Repo map.** Xây dựng `repomap.md` đầu tiên cùng cache ký hiệu của nó, để các lần hook xây dựng lại sau này là tăng dần.
 
 ### 14.2 Máy trạng thái của manifest
 
@@ -722,7 +791,7 @@ Bộ cài đặt phải nâng cấp các tệp mà nó đã ghi, nhưng không b
 | `m = hash(cur)` (người dùng chưa sửa tệp kể từ khi tokenkit ghi nó) | ghi `tpl` mới | `updated` |
 | trường hợp khác (đã sửa cục bộ, hoặc không do tokenkit tạo) | giữ nguyên tệp | `skipped` |
 
-Ngoại lệ duy nhất là `.github/copilot-instructions.md`. Nó được **gộp**, không được thay thế. `mergeBlock` (`install.mjs:22`) chỉ thay văn bản nằm giữa `<!-- tokenkit:start -->` và `<!-- tokenkit:end -->`, hoặc thêm khối vào cuối nếu thiếu dấu. Quy tắc riêng của người dùng không bao giờ bị động đến.
+Ngoại lệ duy nhất là `.github/copilot-instructions.md`. Nó được **gộp**, không được thay thế. `mergeBlock` (`install.mjs:25`) chỉ thay văn bản nằm giữa `<!-- tokenkit:start -->` và `<!-- tokenkit:end -->`, hoặc thêm khối vào cuối nếu thiếu dấu. Quy tắc riêng của người dùng không bao giờ bị động đến.
 
 Các tệp mà phiên bản cũ đã cài nhưng phiên bản hiện tại không còn cung cấp sẽ bị **thu hồi**: xóa nếu chưa bị sửa, giữ lại kèm ghi chú nếu đã sửa. Nếu không, các tệp "chết" sẽ tiếp tục tốn token.
 
@@ -732,7 +801,7 @@ Thời gian sửa đổi cho biết khi nào tệp thay đổi, không cho biế
 
 ### 14.4 Gỡ bỏ
 
-`uninstall` (`install.mjs:120`) đảo ngược quá trình với cùng manifest. Nó chỉ xóa một tệp nếu hash của tệp vẫn khớp manifest, gỡ khối tokenkit khỏi tệp chỉ dẫn (giữ lại phần còn lại), gỡ các dòng `.gitignore` của tokenkit, và xóa `.tokenkit/`. Tệp đã sửa được báo là `kept`.
+`uninstall` (`install.mjs:123`) đảo ngược quá trình với cùng manifest. Nó chỉ xóa một tệp nếu hash của tệp vẫn khớp manifest, gỡ khối tokenkit khỏi tệp chỉ dẫn (giữ lại phần còn lại), gỡ các dòng `.gitignore` của tokenkit, và xóa `.tokenkit/`. Tệp đã sửa được báo là `kept`.
 
 ---
 
@@ -744,11 +813,13 @@ Thời gian sửa đổi cho biết khi nào tệp thay đổi, không cho biế
 |---|---|---|
 | guard chặn lockfile | `read_file` trên `package-lock.json` | guard trả về quyết định `deny` |
 | guard định tuyến `npm test` | `run_in_terminal` với `npm test` | guard trả về `updatedInput` chạy qua `tk.mjs` (hoặc deny ở chế độ deny) |
-| `userPromptSubmitted` chạy | một prompt | thoát 0 |
-| `postToolUse` chạy | một đầu ra terminal | thoát 0 |
-| `sessionStart` chạy | không có công cụ | thoát 0 |
+| `userPromptSubmitted` chạy | một prompt, sau khi làm cũ repo map | thoát 0 trong `timeoutSec` của nó |
+| `postToolUse` chạy | một đầu ra terminal | thoát 0 trong `timeoutSec` của nó |
+| `sessionStart` chạy | không có công cụ, sau khi làm cũ repo map | thoát 0 trong `timeoutSec` của nó |
 
-Nó cũng kiểm tra tệp hook, khối chỉ dẫn, repo map, `.gitignore`, việc `.tokenkit/` có được commit hay không, và ngân sách luôn bật.
+Mỗi hook chạy với `timeoutSec` riêng trong `tokenkit.json`, giống VS Code, vốn hủy hook chạy chậm. Trước khi chạy hook prompt và hook session, doctor lùi mtime của map một ngày, để chúng đi theo nhánh chậm (làm mới map) mà VS Code sẽ gặp. Hook hết thời gian thì kiểm tra thất bại. Hook dùng hơn một nửa giới hạn thì nhận cảnh báo, kèm gợi ý dùng `map.exclude`. Mỗi dòng ghi thời gian đã dùng: `userPromptSubmitted hook runs (2.0s of its 10s limit, refreshing a stale map)`.
+
+Nó cũng kiểm tra tệp hook, khối chỉ dẫn, repo map, `.gitignore`, việc `.tokenkit/` có được commit hay không, và ngân sách luôn bật. Hook fail open, nên lỗi của chúng không hiện ra trong VS Code. Vì vậy doctor cũng báo các mục trong 7 ngày gần nhất của `.tokenkit/logs/errors.jsonl`.
 
 Điều doctor không thể kiểm tra là những gì chỉ VS Code biết: Workspace Trust, chính sách hook của tổ chức, và việc "Chat: Configure Hooks" có liệt kê tệp hay không. Đầu ra nói rõ điều này.
 
@@ -770,7 +841,7 @@ Phần này theo dõi một yêu cầu trong VS Code qua mọi cơ chế. Ngư�
 
 6. **Nén.** Toàn bộ đầu ra được ghi vào `run-<time>.log` và `last.log`. `compress` chạy với `exitCode = 1`. Các dòng được chuẩn hóa. Các khung thư viện được gộp. Các dòng tiến trình và test pass bị bỏ và được đếm. Các dòng lặp được gộp. Có nhiều hơn 80 hàng, nên giữ 6 hàng đầu và 20 hàng cuối, và các cửa sổ lỗi được thêm theo thứ tự miễn là còn nằm trong 80. Kết quả khoảng 29 dòng.
 
-7. **Đầu ra.** `runCommand` in `[tk] FAILED exit 1 in 6.4s · 1540→29 lines, ~10k→~300 tokens · full log: .tokenkit/logs/last.log`, rồi các ghi chú (ví dụ `1204 passing-test line(s) hidden`), rồi văn bản đã nén. Một dòng được thêm vào `runs.jsonl`.
+7. **Đầu ra.** `runCommand` in `[tk] FAILED exit 1 in 6.4s · 1540→29 lines, ~10k→~300 tokens · full log: .tokenkit/logs/run-<timestamp>.log`, rồi các ghi chú (ví dụ `1204 passing-test line(s) hidden`), rồi văn bản đã nén. Một dòng được thêm vào `runs.jsonl`.
 
 8. **Hook sau công cụ.** `post.mjs` chạy trên kết quả công cụ. Trong VS Code (`!camel`), nó chỉ ghi kích thước đầu ra vào `tools.jsonl`. Nó cũng kiểm tra điều kiện dự phòng: đầu ra bắt đầu bằng `[tk]`, tức việc viết lại đã thành công, nên không có gì được ghi vào `state.json`. Kết quả không bị thay thế, vì VS Code không hỗ trợ điều đó.
 
@@ -798,9 +869,9 @@ Tổng tác động lên ngữ cảnh của agent là khác biệt giữa khoả
 
 - Lệnh đọc có pipe được phân loại là lệnh đọc (mục 7.6).
 - `ERROR` khớp từ `error` trong dòng tổng kết thành công, nên các dòng `0 errors` được giữ lại (mục 6.9).
-- `mapIsStale` gọi `stat` trên mọi tệp mã nguồn ở mỗi prompt, nên chi phí tăng tuyến tính theo kích thước repo (mục 9.4).
+- `mapIsStale` gọi `stat` trên mọi tệp mã nguồn ở mỗi prompt, nên chi phí tăng tuyến tính theo kích thước repo: khoảng 0,4 s cho 10.500 tệp (mục 9.4).
 - Bộ so khớp vị trí không có IDF và không có từ đồng nghĩa, nên bỏ sót các yêu cầu không nêu tên mã (mục 10.5).
-- Kiểm thử: `node --test "test/*.test.mjs"` (script `npm test`) chạy 46 test trong repo hiện tại, và tất cả đều pass.
+- Kiểm thử: `node --test "test/*.test.mjs"` (script `npm test`) chạy 57 test trong repo hiện tại, và tất cả đều pass.
 
 ---
 
@@ -810,34 +881,35 @@ Tổng tác động lên ngữ cảnh của agent là khác biệt giữa khoả
 |---|---|---|---|
 | Điều phối CLI | `src/tk.mjs` | `main` | một `switch` theo đối số đầu tiên |
 | Ước lượng token | `src/lib/tokens.mjs` | `estimateTokens` (4) | mục 5 |
-| Bộ nén đầu ra | `src/lib/compress.mjs` | `compress` (55); regex `NOISE` (9), `PASS` (25), `LIB_FRAME` (39), `ERROR` (49) | mục 6 |
+| Bộ nén đầu ra | `src/lib/compress.mjs` | `compress` (72); regex `NOISE` (9), `PASS` (25), `LIB_FRAME` (39), `ERROR` (49), `LOCATION` (60) | mục 6 |
 | Chạy lệnh | `src/lib/run.mjs` | `runCommand` (33), `spawnIn` (24), `joinArgs` (10) | mục 8.1 |
-| Kiểm tra | `src/lib/verify.mjs` | `detectChecks` (23), `verify` (52) | mục 8.2 |
+| Kiểm tra | `src/lib/verify.mjs` | `findProjects` (41), `detectChecks` (101), `verify` (117) | mục 8.2 |
 | Luật lệnh | `src/lib/rules.mjs` | `classifyCommand` (59), `checkWrapped` (50), `wrapCommand` (41), `blockedPath` (76); `VERBOSE` (7), `BOUNDED` (24) | mục 7 |
 | Bộ chuyển đổi I/O hook | `src/lib/hookio.mjs` | `normalize` (19), `emitDeny` (37), `emitRewrite` (47), `emitResult` (54), `logEvent` (58), `commandMode` (80), `runHook` (88) | mục 3.3 |
 | Hook guard | `src/hooks/guard.mjs` | hàm callback của `runHook` (43), `diffTooLarge` (25), `sizeKB` (17) | mục 4.3 |
 | Hook post | `src/hooks/post.mjs` | hàm callback của `runHook` (23), `headTail` (17) | mục 4.4 |
 | Hook prompt | `src/hooks/prompt.mjs` | hàm callback của `runHook` (23), `emitContext` (16) | mục 4.2 |
 | Hook session | `src/hooks/session.mjs` | hàm callback của `runHook` (10) | mục 4.1 |
-| Repo map | `src/lib/repomap.mjs` | `extractSymbols` (78), `listFiles` (111), `buildMap` (143), `mapIsStale` (184), `writeMap` (201), `findSymbol` (209); `LANGS` (18) | mục 9 |
-| Gợi ý vị trí | `src/lib/locate.mjs` | `extractCues` (77), `locate` (96), `formatHints` (172), `stem` (42); `STOP` (10), `GENERIC_PATH` (26), `SUFFIXES` (39) | mục 10 |
+| Repo map | `src/lib/repomap.mjs` | `extractSymbols` (81), `listFiles` (117), `sourceFiles` (168), `buildMap` (178), `buildOverview` (215), `mapIsStale` (242), `writeMap` (261), `findSymbol` (280); `LANGS` (21) | mục 9 |
+| Gợi ý vị trí | `src/lib/locate.mjs` | `extractCues` (84), `locate` (103), `formatHints` (187), `stem` (44); `STOP` (10), `GENERIC_PATH` (26), `SUFFIXES` (39) | mục 10 |
 | TaskSpec | `src/lib/spec.mjs` | `parseSpec` (46), `expandSpec` (70); `VERBS` (7), `FLAG_DEFS` (20) | mục 11 |
 | Kiểm toán ngân sách | `src/lib/budget.mjs` | `audit` (62), `lint` (43), `parseFrontmatter` (12), `formatAudit` (144) | mục 12 |
 | Báo cáo | `src/lib/report.mjs` | `report` (13) | mục 13.1 |
 | Dữ liệu sử dụng VS Code | `src/lib/usage.mjs` | `findWorkspaceStorage` (28), `summarizeSession` (44), `debugLogStats` (123), `usageReport` (151), `formatCompare` (173) | mục 13.2 |
-| Cài đặt và gỡ bỏ | `src/lib/install.mjs` | `install` (29), `mergeBlock` (22), `uninstall` (120); `START`/`END` (7) | mục 14 |
+| Cài đặt và gỡ bỏ | `src/lib/install.mjs` | `install` (32), `mergeBlock` (25), `uninstall` (123); `START`/`END` (8) | mục 14 |
 | Kiểm tra sức khỏe | `src/lib/doctor.mjs` | `doctor` (14) | mục 15 |
-| Cấu hình | `src/lib/config.mjs` | `DEFAULTS`, `loadConfig` (66), `merge` (58), `KIT_DIR` | mọi tham số đều nằm ở đây |
+| Cấu hình | `src/lib/config.mjs` | `DEFAULTS`, `loadConfig` (71), `merge` (63), `KIT_DIR` | mọi tham số đều nằm ở đây |
 | Đăng ký hook | `templates/.github/hooks/tokenkit.json` | bốn sự kiện | mẫu dòng lệnh fail-open |
 | Chỉ dẫn cho agent | `templates/.github/copilot-instructions.md` | khối được đánh dấu | luôn bật, khoảng 324 token |
 | Skills | `templates/.github/skills/*/SKILL.md` | `lean-explore`, `lean-verify` | nạp khi liên quan |
-| Kiểm thử | `test/*.test.mjs` | `node --test "test/*.test.mjs"` | 46 test, tất cả pass tại thời điểm viết |
+| Kiểm thử | `test/*.test.mjs` | `node --test "test/*.test.mjs"` | 57 test, tất cả pass tại thời điểm viết |
 
 ### Tham chiếu cấu hình (từ `config.mjs`)
 
 | Khóa | Mặc định | Dùng bởi | Tác dụng |
 |---|---|---|---|
-| `run.maxLines` | 80 | `compress` | giới hạn số dòng khi thất bại |
+| `run.maxLines` | 80 | `compress` | giới hạn số dòng đầu, cuối và ngữ cảnh khi thất bại |
+| `run.maxErrorLines` | 150 | `compress` | ngân sách riêng cho dòng lỗi và vị trí `file:line` của chúng |
 | `run.headLines` / `tailLines` | 6 / 20 | `compress` | số hàng giữ ở đầu và cuối khi thất bại |
 | `run.successTail` | 8 | `compress` | phần cuối giữ khi thành công (giới hạn là gấp đôi giá trị này) |
 | `run.context` | 2 | `compress` | số dòng giữ quanh mỗi dòng lỗi |
@@ -854,10 +926,11 @@ Tổng tác động lên ngữ cảnh của agent là khác biệt giữa khoả
 | `prompt.hints` | `on` | hook prompt | `on` hoặc `off` |
 | `prompt.maxHints` | 5 | `locate` | số gợi ý mỗi prompt |
 | `prompt.minScore` | 5 | `locate` | ngưỡng sàn cho gợi ý (10 = đúng tên, 8 = hai từ, 5 = một từ khớp toàn bộ tên) |
-| `map.maxTokens` | 4000 | `buildMap` | ngân sách cho repo map |
+| `map.maxTokens` | 4000 | `buildMap` | vượt mức này thì map chỉ để grep và `areas.md` được ghi trong ngân sách này |
 | `map.maxAgeMinutes` | 60 | `mapIsStale` | giới hạn tuổi của map |
-| `map.maxFileKB` | 256 | `buildMap` | tệp lớn hơn không được lập chỉ mục |
-| `map.exclude` | `[]` | `buildMap` | regex cho các tệp cần bỏ qua |
+| `map.maxFileKB` | 256 | `buildMap` | tệp lớn hơn chỉ được liệt kê đường dẫn |
+| `map.exclude` | `[]` | `sourceFiles` | regex cho các tệp cần bỏ qua |
+| `verify.checks` | `[]` | `detectChecks` | các kiểm tra `{ label, cwd, cmd }` tường minh, thay thế việc dò tìm |
 | `budget.alwaysOnTokens` | 1200 | `audit` | ngân sách luôn bật |
 | `budget.skillDescriptionChars` | 300 | `audit` | giới hạn mô tả skill |
 
@@ -876,7 +949,7 @@ Tổng tác động lên ngữ cảnh của agent là khác biệt giữa khoả
 - **Viết lại** (rewrite): thay đổi đối số của một lệnh gọi công cụ trước khi nó chạy. Hộp thoại duyệt khi đó hiển thị lệnh gọi đã viết lại.
 - **Wrapper**: dạng `tk run … -- <cmd>` mà một lệnh đã viết lại mang.
 - **Repo map**: chỉ mục ký hiệu mỗi tệp một dòng trong `.tokenkit/repomap.md`.
-- **Mức suy giảm** (degradation level): bước mà repo map mất chi tiết để vừa ngân sách.
+- **Bản tổng quan thư mục** (folder overview): `.tokenkit/areas.md`, được ghi khi repo map vượt ngân sách token, để agent thấy các khu vực của repo mà không cần đọc map.
 - **Cue**: một phần của prompt dùng để khớp (định danh, đường dẫn, từ, hoặc cặp từ ghép).
 - **Gốc từ** (stem): phần gốc của một từ sau khi bỏ hậu tố nhẹ, để `applied` khớp với `apply`.
 - **Gợi ý** (hint): một dòng "hãy bắt đầu đọc ở đây" được thêm vào prompt.
